@@ -274,3 +274,58 @@ class EscalationSummarySerializer(serializers.Serializer):
     escalation_type = serializers.CharField(allow_null=True, required=False)
     escalation_reason = serializers.CharField(allow_null=True, required=False)
     escalated_at = serializers.DateTimeField(allow_null=True, required=False)
+
+
+class WorkbenchFilterSerializer(serializers.Serializer):
+    hall_id = serializers.IntegerField(required=False)
+    status = serializers.CharField(required=False)
+    fault_level = serializers.CharField(required=False)
+    start_date = serializers.DateTimeField(required=False)
+    end_date = serializers.DateTimeField(required=False)
+    page = serializers.IntegerField(default=1, required=False)
+    page_size = serializers.IntegerField(default=20, required=False)
+    category = serializers.CharField(required=False)
+
+
+class WorkbenchItemSerializer(serializers.Serializer):
+    id = serializers.IntegerField()
+    type = serializers.CharField()
+    category = serializers.CharField()
+    category_label = serializers.CharField()
+    title = serializers.CharField()
+    description = serializers.CharField(allow_null=True, required=False)
+    hall_id = serializers.IntegerField()
+    hall_code = serializers.CharField()
+    session_no = serializers.CharField(allow_null=True, required=False)
+    status = serializers.CharField()
+    status_label = serializers.CharField()
+    fault_level = serializers.CharField(allow_null=True, required=False)
+    fault_level_label = serializers.CharField(allow_null=True, required=False)
+    related_person = serializers.CharField(allow_null=True, required=False)
+    created_at = serializers.DateTimeField()
+    updated_at = serializers.DateTimeField(allow_null=True, required=False)
+    deadline = serializers.DateTimeField(allow_null=True, required=False)
+    detail_url = serializers.CharField()
+    has_reminder = serializers.BooleanField(default=False)
+    reminder_count = serializers.IntegerField(default=0)
+    is_escalated = serializers.BooleanField(default=False)
+    escalation_reason = serializers.CharField(allow_null=True, required=False)
+
+
+class WorkbenchCategorySummarySerializer(serializers.Serializer):
+    category = serializers.CharField()
+    category_label = serializers.CharField()
+    count = serializers.IntegerField()
+    latest_item = WorkbenchItemSerializer(allow_null=True, required=False)
+
+
+class WorkbenchSummarySerializer(serializers.Serializer):
+    total_pending = serializers.IntegerField()
+    categories = WorkbenchCategorySummarySerializer(many=True)
+
+
+class WorkbenchListResponseSerializer(serializers.Serializer):
+    total = serializers.IntegerField()
+    page = serializers.IntegerField()
+    page_size = serializers.IntegerField()
+    items = WorkbenchItemSerializer(many=True)

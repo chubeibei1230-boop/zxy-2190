@@ -14,12 +14,13 @@ from inspection.serializers import (
     FaultReopenSerializer, FaultSerializer,
     ReminderSerializer, ReminderCreateSerializer, ReminderListFilterSerializer,
     EscalationSerializer, EscalationListFilterSerializer,
-    ReminderSummarySerializer, EscalationSummarySerializer
+    ReminderSummarySerializer, EscalationSummarySerializer,
+    WorkbenchFilterSerializer, WorkbenchSummarySerializer, WorkbenchListResponseSerializer
 )
 from inspection.services import (
     HallService, TemplateService, InspectionOrderService,
     StatisticsService, AlertService, FaultService,
-    ReminderService, EscalationService
+    ReminderService, EscalationService, WorkbenchService
 )
 
 
@@ -871,3 +872,54 @@ class ReminderSummaryView(APIView):
             'reminder': reminder_summary,
             'escalation': escalation_summary
         })
+
+
+class WorkbenchSummaryView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        serializer = WorkbenchFilterSerializer(data=request.query_params)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        filters = {}
+        for key in ['hall_id', 'status', 'fault_level', 'start_date', 'end_date']:
+            if key in serializer.validated_data and serializer.validated_data[key] is not None:
+                filters[key] = serializer.validated_data[key]
+
+        summary = WorkbenchService.get_workbench_summary(
+            user_role=request.user.role,
+            user_id=request.user.id,
+            filters=filters
+        )
+
+        return Response(summary)
+
+
+class WorkbenchListView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        serializer = WorkbenchFilterSerializer(data=request.query_params)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        filters = {}
+        for key in ['hall_id', 'status', 'fault_level', 'start_date', 'end_date']:
+            if key in serializer.validated_data and serializer.validated_data[key] is not None:
+                filters[key] = serializer.validated_data[key]
+
+        page = serializer.validated_data.get('page', 1)
+        page_size = serializer.validated_data.get('page_size', 20)
+        category = serializer.validated_data.get('category')
+
+        result = WorkbenchService.get_workbench_list(
+            user_role=request.user.role,
+            user_id=request.user.id,
+            filters=filters,
+            page=page,
+            page_size=page_size,
+            category=category
+        )
+
+        return Response(result)

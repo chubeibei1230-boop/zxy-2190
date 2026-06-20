@@ -53,4 +53,7 @@ urlpatterns = [
     path('escalations/faults/', views.FaultEscalationListView.as_view(), name='escalation-fault-list'),
     path('escalations/check/', views.EscalationCheckView.as_view(), name='escalation-check'),
     path('reminder-summary/', views.ReminderSummaryView.as_view(), name='reminder-summary'),
+    
+    path('workbench/summary/', views.WorkbenchSummaryView.as_view(), name='workbench-summary'),
+    path('workbench/items/', views.WorkbenchListView.as_view(), name='workbench-list'),
 ]

@@ -1778,3 +1778,692 @@ class EscalationService:
             'page_size': page_size,
             'items': items
         }
+
+
+class WorkbenchService:
+    CATEGORY_PENDING_SELF_CHECK = 'pending_self_check'
+    CATEGORY_PENDING_REVIEW = 'pending_review'
+    CATEGORY_PENDING_FAULT = 'pending_fault'
+    CATEGORY_PENDING_CLOSE_FAULT = 'pending_close_fault'
+    CATEGORY_REMINDED = 'reminded'
+    CATEGORY_ESCALATED = 'escalated'
+
+    CATEGORY_LABELS = {
+        CATEGORY_PENDING_SELF_CHECK: '待自检',
+        CATEGORY_PENDING_REVIEW: '待复核',
+        CATEGORY_PENDING_FAULT: '待处理故障',
+        CATEGORY_PENDING_CLOSE_FAULT: '待关闭故障',
+        CATEGORY_REMINDED: '已被催办',
+        CATEGORY_ESCALATED: '已超时升级'
+    }
+
+    FAULT_LEVEL_LABELS = {
+        'low': '低',
+        'medium': '中',
+        'high': '高',
+        'critical': '严重'
+    }
+
+    ORDER_STATUS_LABELS = {
+        'pending_check': '待检查',
+        'checking': '检查中',
+        'pending_review': '待复映',
+        'fault_handling': '故障处理中',
+        'ready': '可放映',
+        'suspended': '暂停放映'
+    }
+
+    @staticmethod
+    def _get_fault_level_label(level):
+        return WorkbenchService.FAULT_LEVEL_LABELS.get(level, level)
+
+    @staticmethod
+    def _get_order_status_label(status):
+        return WorkbenchService.ORDER_STATUS_LABELS.get(status, status)
+
+    @staticmethod
+    def _get_fault_status_label(status):
+        return FaultService.STATUS_CHOICES.get(status, status)
+
+    @staticmethod
+    def _format_order_item(order, category, category_label):
+        reminder_info = ReminderService.get_reminder_summary('order', order['id'])
+        escalation_info = EscalationService.get_escalation_summary('order', order['id'])
+        
+        title = f"影厅 {order['hall_code']} 场次 {order['session_no']} 巡检"
+        description = order.get('fault_description') or order.get('temp_solution') or ''
+        
+        related_person = order.get('reviewer_name') or order.get('projectionist_name')
+        
+        return {
+            'id': order['id'],
+            'type': 'order',
+            'category': category,
+            'category_label': category_label,
+            'title': title,
+            'description': description,
+            'hall_id': order['hall_id'],
+            'hall_code': order['hall_code'],
+            'session_no': order['session_no'],
+            'status': order['status'],
+            'status_label': WorkbenchService._get_order_status_label(order['status']),
+            'fault_level': order.get('fault_level'),
+            'fault_level_label': WorkbenchService._get_fault_level_label(order.get('fault_level')) if order.get('fault_level') else None,
+            'related_person': related_person,
+            'created_at': order['created_at'],
+            'updated_at': order.get('updated_at'),
+            'deadline': order.get('review_deadline'),
+            'detail_url': f"/api/orders/{order['id']}/",
+            'has_reminder': reminder_info.get('has_reminder', False),
+            'reminder_count': reminder_info.get('reminder_count', 0),
+            'is_escalated': escalation_info.get('is_escalated', False),
+            'escalation_reason': escalation_info.get('escalation_reason')
+        }
+
+    @staticmethod
+    def _format_fault_item(fault, category, category_label):
+        reminder_info = ReminderService.get_reminder_summary('fault', fault['id'])
+        escalation_info = EscalationService.get_escalation_summary('fault', fault['id'])
+        
+        title = f"影厅 {fault.get('hall_code')} 场次 {fault.get('session_no')} 故障"
+        description = fault.get('description') or fault.get('latest_progress') or ''
+        
+        related_person = fault.get('reviewer_name') or fault.get('handler_name') or fault.get('assigned_to_name')
+        
+        return {
+            'id': fault['id'],
+            'type': 'fault',
+            'category': category,
+            'category_label': category_label,
+            'title': title,
+            'description': description,
+            'hall_id': fault['hall_id'],
+            'hall_code': fault.get('hall_code'),
+            'session_no': fault.get('session_no'),
+            'status': fault['processing_status'],
+            'status_label': WorkbenchService._get_fault_status_label(fault['processing_status']),
+            'fault_level': fault.get('fault_level'),
+            'fault_level_label': WorkbenchService._get_fault_level_label(fault.get('fault_level')) if fault.get('fault_level') else None,
+            'related_person': related_person,
+            'created_at': fault['created_at'],
+            'updated_at': fault.get('updated_at'),
+            'deadline': None,
+            'detail_url': f"/api/faults/{fault['id']}/",
+            'has_reminder': reminder_info.get('has_reminder', False),
+            'reminder_count': reminder_info.get('reminder_count', 0),
+            'is_escalated': escalation_info.get('is_escalated', False),
+            'escalation_reason': escalation_info.get('escalation_reason')
+        }
+
+    @staticmethod
+    def _apply_filters(sql, count_sql, params, filters):
+        count_params = params[:]
+        
+        if not filters:
+            return sql, count_sql, params, count_params
+        
+        if filters.get('hall_id'):
+            sql += " AND hall_id = ?"
+            count_sql += " AND hall_id = ?"
+            params.append(filters['hall_id'])
+            count_params.append(filters['hall_id'])
+        if filters.get('fault_level'):
+            sql += " AND fault_level = ?"
+            count_sql += " AND fault_level = ?"
+            params.append(filters['fault_level'])
+            count_params.append(filters['fault_level'])
+        if filters.get('status'):
+            sql += " AND status = ?"
+            count_sql += " AND status = ?"
+            params.append(filters['status'])
+            count_params.append(filters['status'])
+        if filters.get('start_date'):
+            sql += " AND created_at >= ?"
+            count_sql += " AND created_at >= ?"
+            params.append(filters['start_date'])
+            count_params.append(filters['start_date'])
+        if filters.get('end_date'):
+            sql += " AND created_at <= ?"
+            count_sql += " AND created_at <= ?"
+            params.append(filters['end_date'])
+            count_params.append(filters['end_date'])
+        
+        return sql, count_sql, params, count_params
+
+    @staticmethod
+    def _apply_role_filter_orders(sql, count_sql, params, count_params, user_role, user_id):
+        if user_role == 'admin':
+            return sql, count_sql, params, count_params
+        
+        if user_role == 'projectionist':
+            sql += " AND projectionist_id = ?"
+            count_sql += " AND projectionist_id = ?"
+            params.append(user_id)
+            count_params.append(user_id)
+        elif user_role == 'reviewer':
+            sql += " AND (reviewer_id = ? OR reviewer_id IS NULL)"
+            count_sql += " AND (reviewer_id = ? OR reviewer_id IS NULL)"
+            params.append(user_id)
+            count_params.append(user_id)
+        
+        return sql, count_sql, params, count_params
+
+    @staticmethod
+    def _apply_role_filter_faults(sql, count_sql, params, count_params, user_role, user_id):
+        if user_role == 'admin':
+            return sql, count_sql, params, count_params
+        
+        if user_role == 'projectionist':
+            sql += " AND (f.handler_id = ? OR f.assigned_to_id = ?)"
+            count_sql += " AND (handler_id = ? OR assigned_to_id = ?)"
+            params.extend([user_id, user_id])
+            count_params.extend([user_id, user_id])
+        elif user_role == 'reviewer':
+            sql += " AND (f.reviewer_id = ? OR f.reviewer_id IS NULL)"
+            count_sql += " AND (reviewer_id = ? OR reviewer_id IS NULL)"
+            params.append(user_id)
+            count_params.append(user_id)
+        
+        return sql, count_sql, params, count_params
+
+    @staticmethod
+    def get_pending_self_check(user_role=None, user_id=None, filters=None, page=1, page_size=100):
+        sql = """SELECT * FROM inspection_orders WHERE status IN ('pending_check', 'checking')"""
+        count_sql = """SELECT COUNT(*) as cnt FROM inspection_orders WHERE status IN ('pending_check', 'checking')"""
+        params = []
+        
+        sql, count_sql, params, count_params = WorkbenchService._apply_filters(
+            sql, count_sql, params, filters
+        )
+        sql, count_sql, params, count_params = WorkbenchService._apply_role_filter_orders(
+            sql, count_sql, params, count_params, user_role, user_id
+        )
+        
+        sql += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
+        params.extend([page_size, (page - 1) * page_size])
+        
+        total = dict_fetch_one(count_sql, count_params)['cnt'] if count_params else dict_fetch_one(count_sql)['cnt']
+        orders = dict_fetch_all(sql, params)
+        
+        items = [WorkbenchService._format_order_item(
+            o, WorkbenchService.CATEGORY_PENDING_SELF_CHECK,
+            WorkbenchService.CATEGORY_LABELS[WorkbenchService.CATEGORY_PENDING_SELF_CHECK]
+        ) for o in orders]
+        
+        return {'total': total, 'items': items}
+
+    @staticmethod
+    def get_pending_review(user_role=None, user_id=None, filters=None, page=1, page_size=100):
+        items = []
+        
+        order_sql = """SELECT * FROM inspection_orders 
+                       WHERE (status = 'pending_review' 
+                              OR (status = 'fault_handling' AND temp_solution IS NOT NULL AND temp_solution != ''))"""
+        order_count_sql = """SELECT COUNT(*) as cnt FROM inspection_orders 
+                             WHERE (status = 'pending_review' 
+                                    OR (status = 'fault_handling' AND temp_solution IS NOT NULL AND temp_solution != ''))"""
+        params = []
+        
+        order_sql, order_count_sql, params, count_params = WorkbenchService._apply_filters(
+            order_sql, order_count_sql, params, filters
+        )
+        order_sql, order_count_sql, params, count_params = WorkbenchService._apply_role_filter_orders(
+            order_sql, order_count_sql, params, count_params, user_role, user_id
+        )
+        
+        order_sql += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
+        params.extend([page_size, (page - 1) * page_size])
+        
+        order_total = dict_fetch_one(order_count_sql, count_params)['cnt'] if count_params else dict_fetch_one(order_count_sql)['cnt']
+        orders = dict_fetch_all(order_sql, params)
+        
+        for o in orders:
+            items.append(WorkbenchService._format_order_item(
+                o, WorkbenchService.CATEGORY_PENDING_REVIEW,
+                WorkbenchService.CATEGORY_LABELS[WorkbenchService.CATEGORY_PENDING_REVIEW]
+            ))
+        
+        fault_sql = """SELECT f.*, h.hall_code, h.hall_name, o.session_no 
+                       FROM fault_records f
+                       LEFT JOIN halls h ON f.hall_id = h.id
+                       LEFT JOIN inspection_orders o ON f.order_id = o.id
+                       WHERE f.is_closed = FALSE 
+                       AND f.processing_status IN ('temp_solved', 'reviewing')"""
+        fault_count_sql = """SELECT COUNT(*) as cnt FROM fault_records f
+                             WHERE f.is_closed = FALSE 
+                             AND f.processing_status IN ('temp_solved', 'reviewing')"""
+        f_params = []
+        
+        if filters:
+            f_count_params = f_params[:]
+            if filters.get('hall_id'):
+                fault_sql += " AND f.hall_id = ?"
+                fault_count_sql += " AND f.hall_id = ?"
+                f_params.append(filters['hall_id'])
+                f_count_params.append(filters['hall_id'])
+            if filters.get('fault_level'):
+                fault_sql += " AND f.fault_level = ?"
+                fault_count_sql += " AND f.fault_level = ?"
+                f_params.append(filters['fault_level'])
+                f_count_params.append(filters['fault_level'])
+            if filters.get('status'):
+                fault_sql += " AND f.processing_status = ?"
+                fault_count_sql += " AND f.processing_status = ?"
+                f_params.append(filters['status'])
+                f_count_params.append(filters['status'])
+            if filters.get('start_date'):
+                fault_sql += " AND f.created_at >= ?"
+                fault_count_sql += " AND f.created_at >= ?"
+                f_params.append(filters['start_date'])
+                f_count_params.append(filters['start_date'])
+            if filters.get('end_date'):
+                fault_sql += " AND f.created_at <= ?"
+                fault_count_sql += " AND f.created_at <= ?"
+                f_params.append(filters['end_date'])
+                f_count_params.append(filters['end_date'])
+            
+            fault_sql, fault_count_sql, f_params, f_count_params = WorkbenchService._apply_role_filter_faults(
+                fault_sql, fault_count_sql, f_params, f_count_params, user_role, user_id
+            )
+        else:
+            f_count_params = []
+            fault_sql, fault_count_sql, f_params, f_count_params = WorkbenchService._apply_role_filter_faults(
+                fault_sql, fault_count_sql, f_params, f_count_params, user_role, user_id
+            )
+        
+        fault_sql += " ORDER BY f.created_at DESC LIMIT ? OFFSET ?"
+        f_params.extend([page_size, (page - 1) * page_size])
+        
+        fault_total = dict_fetch_one(fault_count_sql, f_count_params)['cnt'] if f_count_params else dict_fetch_one(fault_count_sql)['cnt']
+        faults = dict_fetch_all(fault_sql, f_params)
+        
+        for f in faults:
+            items.append(WorkbenchService._format_fault_item(
+                f, WorkbenchService.CATEGORY_PENDING_REVIEW,
+                WorkbenchService.CATEGORY_LABELS[WorkbenchService.CATEGORY_PENDING_REVIEW]
+            ))
+        
+        items.sort(key=lambda x: x['created_at'], reverse=True)
+        
+        return {'total': order_total + fault_total, 'items': items}
+
+    @staticmethod
+    def get_pending_fault(user_role=None, user_id=None, filters=None, page=1, page_size=100):
+        sql = """SELECT f.*, h.hall_code, h.hall_name, o.session_no 
+                 FROM fault_records f
+                 LEFT JOIN halls h ON f.hall_id = h.id
+                 LEFT JOIN inspection_orders o ON f.order_id = o.id
+                 WHERE f.is_closed = FALSE 
+                 AND f.processing_status IN ('pending', 'assigned', 'processing')"""
+        count_sql = """SELECT COUNT(*) as cnt FROM fault_records f
+                       WHERE f.is_closed = FALSE 
+                       AND f.processing_status IN ('pending', 'assigned', 'processing')"""
+        params = []
+        count_params = []
+        
+        if filters:
+            if filters.get('hall_id'):
+                sql += " AND f.hall_id = ?"
+                count_sql += " AND f.hall_id = ?"
+                params.append(filters['hall_id'])
+                count_params.append(filters['hall_id'])
+            if filters.get('fault_level'):
+                sql += " AND f.fault_level = ?"
+                count_sql += " AND f.fault_level = ?"
+                params.append(filters['fault_level'])
+                count_params.append(filters['fault_level'])
+            if filters.get('status'):
+                sql += " AND f.processing_status = ?"
+                count_sql += " AND f.processing_status = ?"
+                params.append(filters['status'])
+                count_params.append(filters['status'])
+            if filters.get('start_date'):
+                sql += " AND f.created_at >= ?"
+                count_sql += " AND f.created_at >= ?"
+                params.append(filters['start_date'])
+                count_params.append(filters['start_date'])
+            if filters.get('end_date'):
+                sql += " AND f.created_at <= ?"
+                count_sql += " AND f.created_at <= ?"
+                params.append(filters['end_date'])
+                count_params.append(filters['end_date'])
+        
+        sql, count_sql, params, count_params = WorkbenchService._apply_role_filter_faults(
+            sql, count_sql, params, count_params, user_role, user_id
+        )
+        
+        sql += " ORDER BY f.created_at DESC LIMIT ? OFFSET ?"
+        params.extend([page_size, (page - 1) * page_size])
+        
+        total = dict_fetch_one(count_sql, count_params)['cnt'] if count_params else dict_fetch_one(count_sql)['cnt']
+        faults = dict_fetch_all(sql, params)
+        
+        items = [WorkbenchService._format_fault_item(
+            f, WorkbenchService.CATEGORY_PENDING_FAULT,
+            WorkbenchService.CATEGORY_LABELS[WorkbenchService.CATEGORY_PENDING_FAULT]
+        ) for f in faults]
+        
+        return {'total': total, 'items': items}
+
+    @staticmethod
+    def get_pending_close_fault(user_role=None, user_id=None, filters=None, page=1, page_size=100):
+        sql = """SELECT f.*, h.hall_code, h.hall_name, o.session_no 
+                 FROM fault_records f
+                 LEFT JOIN halls h ON f.hall_id = h.id
+                 LEFT JOIN inspection_orders o ON f.order_id = o.id
+                 WHERE f.is_closed = FALSE 
+                 AND f.processing_status = 'reviewing'"""
+        count_sql = """SELECT COUNT(*) as cnt FROM fault_records f
+                       WHERE f.is_closed = FALSE 
+                       AND f.processing_status = 'reviewing'"""
+        params = []
+        count_params = []
+        
+        if filters:
+            if filters.get('hall_id'):
+                sql += " AND f.hall_id = ?"
+                count_sql += " AND f.hall_id = ?"
+                params.append(filters['hall_id'])
+                count_params.append(filters['hall_id'])
+            if filters.get('fault_level'):
+                sql += " AND f.fault_level = ?"
+                count_sql += " AND f.fault_level = ?"
+                params.append(filters['fault_level'])
+                count_params.append(filters['fault_level'])
+            if filters.get('start_date'):
+                sql += " AND f.created_at >= ?"
+                count_sql += " AND f.created_at >= ?"
+                params.append(filters['start_date'])
+                count_params.append(filters['start_date'])
+            if filters.get('end_date'):
+                sql += " AND f.created_at <= ?"
+                count_sql += " AND f.created_at <= ?"
+                params.append(filters['end_date'])
+                count_params.append(filters['end_date'])
+        
+        sql, count_sql, params, count_params = WorkbenchService._apply_role_filter_faults(
+            sql, count_sql, params, count_params, user_role, user_id
+        )
+        
+        sql += " ORDER BY f.created_at DESC LIMIT ? OFFSET ?"
+        params.extend([page_size, (page - 1) * page_size])
+        
+        total = dict_fetch_one(count_sql, count_params)['cnt'] if count_params else dict_fetch_one(count_sql)['cnt']
+        faults = dict_fetch_all(sql, params)
+        
+        items = [WorkbenchService._format_fault_item(
+            f, WorkbenchService.CATEGORY_PENDING_CLOSE_FAULT,
+            WorkbenchService.CATEGORY_LABELS[WorkbenchService.CATEGORY_PENDING_CLOSE_FAULT]
+        ) for f in faults]
+        
+        return {'total': total, 'items': items}
+
+    @staticmethod
+    def get_reminded(user_role=None, user_id=None, filters=None, page=1, page_size=100):
+        items = []
+        
+        order_sql = """SELECT DISTINCT o.* FROM inspection_orders o
+                       INNER JOIN review_reminders r ON r.target_id = o.id AND r.target_type = 'order'
+                       WHERE 1=1"""
+        order_count_sql = """SELECT COUNT(DISTINCT o.id) as cnt FROM inspection_orders o
+                             INNER JOIN review_reminders r ON r.target_id = o.id AND r.target_type = 'order'
+                             WHERE 1=1"""
+        params = []
+        
+        order_sql, order_count_sql, params, count_params = WorkbenchService._apply_filters(
+            order_sql, order_count_sql, params, filters
+        )
+        order_sql, order_count_sql, params, count_params = WorkbenchService._apply_role_filter_orders(
+            order_sql, order_count_sql, params, count_params, user_role, user_id
+        )
+        
+        order_sql += " ORDER BY o.created_at DESC LIMIT ? OFFSET ?"
+        params.extend([page_size, (page - 1) * page_size])
+        
+        order_total = dict_fetch_one(order_count_sql, count_params)['cnt'] if count_params else dict_fetch_one(order_count_sql)['cnt']
+        orders = dict_fetch_all(order_sql, params)
+        
+        for o in orders:
+            items.append(WorkbenchService._format_order_item(
+                o, WorkbenchService.CATEGORY_REMINDED,
+                WorkbenchService.CATEGORY_LABELS[WorkbenchService.CATEGORY_REMINDED]
+            ))
+        
+        fault_sql = """SELECT DISTINCT f.*, h.hall_code, h.hall_name, o.session_no 
+                       FROM fault_records f
+                       INNER JOIN review_reminders r ON r.target_id = f.id AND r.target_type = 'fault'
+                       LEFT JOIN halls h ON f.hall_id = h.id
+                       LEFT JOIN inspection_orders o ON f.order_id = o.id
+                       WHERE f.is_closed = FALSE"""
+        fault_count_sql = """SELECT COUNT(DISTINCT f.id) as cnt FROM fault_records f
+                             INNER JOIN review_reminders r ON r.target_id = f.id AND r.target_type = 'fault'
+                             WHERE f.is_closed = FALSE"""
+        f_params = []
+        f_count_params = []
+        
+        if filters:
+            if filters.get('hall_id'):
+                fault_sql += " AND f.hall_id = ?"
+                fault_count_sql += " AND f.hall_id = ?"
+                f_params.append(filters['hall_id'])
+                f_count_params.append(filters['hall_id'])
+            if filters.get('fault_level'):
+                fault_sql += " AND f.fault_level = ?"
+                fault_count_sql += " AND f.fault_level = ?"
+                f_params.append(filters['fault_level'])
+                f_count_params.append(filters['fault_level'])
+            if filters.get('status'):
+                fault_sql += " AND f.processing_status = ?"
+                fault_count_sql += " AND f.processing_status = ?"
+                f_params.append(filters['status'])
+                f_count_params.append(filters['status'])
+            if filters.get('start_date'):
+                fault_sql += " AND f.created_at >= ?"
+                fault_count_sql += " AND f.created_at >= ?"
+                f_params.append(filters['start_date'])
+                f_count_params.append(filters['start_date'])
+            if filters.get('end_date'):
+                fault_sql += " AND f.created_at <= ?"
+                fault_count_sql += " AND f.created_at <= ?"
+                f_params.append(filters['end_date'])
+                f_count_params.append(filters['end_date'])
+        
+        fault_sql, fault_count_sql, f_params, f_count_params = WorkbenchService._apply_role_filter_faults(
+            fault_sql, fault_count_sql, f_params, f_count_params, user_role, user_id
+        )
+        
+        fault_sql += " ORDER BY f.created_at DESC LIMIT ? OFFSET ?"
+        f_params.extend([page_size, (page - 1) * page_size])
+        
+        fault_total = dict_fetch_one(fault_count_sql, f_count_params)['cnt'] if f_count_params else dict_fetch_one(fault_count_sql)['cnt']
+        faults = dict_fetch_all(fault_sql, f_params)
+        
+        for f in faults:
+            items.append(WorkbenchService._format_fault_item(
+                f, WorkbenchService.CATEGORY_REMINDED,
+                WorkbenchService.CATEGORY_LABELS[WorkbenchService.CATEGORY_REMINDED]
+            ))
+        
+        items.sort(key=lambda x: x['created_at'], reverse=True)
+        
+        return {'total': order_total + fault_total, 'items': items}
+
+    @staticmethod
+    def get_escalated(user_role=None, user_id=None, filters=None, page=1, page_size=100):
+        EscalationService.check_all_escalations()
+        
+        items = []
+        
+        order_sql = """SELECT DISTINCT o.* FROM inspection_orders o
+                       INNER JOIN review_escalations e ON e.target_id = o.id AND e.target_type = 'order'
+                       WHERE e.is_resolved = FALSE"""
+        order_count_sql = """SELECT COUNT(DISTINCT o.id) as cnt FROM inspection_orders o
+                             INNER JOIN review_escalations e ON e.target_id = o.id AND e.target_type = 'order'
+                             WHERE e.is_resolved = FALSE"""
+        params = []
+        
+        order_sql, order_count_sql, params, count_params = WorkbenchService._apply_filters(
+            order_sql, order_count_sql, params, filters
+        )
+        order_sql, order_count_sql, params, count_params = WorkbenchService._apply_role_filter_orders(
+            order_sql, order_count_sql, params, count_params, user_role, user_id
+        )
+        
+        order_sql += " ORDER BY o.created_at DESC LIMIT ? OFFSET ?"
+        params.extend([page_size, (page - 1) * page_size])
+        
+        order_total = dict_fetch_one(order_count_sql, count_params)['cnt'] if count_params else dict_fetch_one(order_count_sql)['cnt']
+        orders = dict_fetch_all(order_sql, params)
+        
+        for o in orders:
+            items.append(WorkbenchService._format_order_item(
+                o, WorkbenchService.CATEGORY_ESCALATED,
+                WorkbenchService.CATEGORY_LABELS[WorkbenchService.CATEGORY_ESCALATED]
+            ))
+        
+        fault_sql = """SELECT DISTINCT f.*, h.hall_code, h.hall_name, o.session_no 
+                       FROM fault_records f
+                       INNER JOIN review_escalations e ON e.target_id = f.id AND e.target_type = 'fault'
+                       LEFT JOIN halls h ON f.hall_id = h.id
+                       LEFT JOIN inspection_orders o ON f.order_id = o.id
+                       WHERE f.is_closed = FALSE AND e.is_resolved = FALSE"""
+        fault_count_sql = """SELECT COUNT(DISTINCT f.id) as cnt FROM fault_records f
+                             INNER JOIN review_escalations e ON e.target_id = f.id AND e.target_type = 'fault'
+                             WHERE f.is_closed = FALSE AND e.is_resolved = FALSE"""
+        f_params = []
+        f_count_params = []
+        
+        if filters:
+            if filters.get('hall_id'):
+                fault_sql += " AND f.hall_id = ?"
+                fault_count_sql += " AND f.hall_id = ?"
+                f_params.append(filters['hall_id'])
+                f_count_params.append(filters['hall_id'])
+            if filters.get('fault_level'):
+                fault_sql += " AND f.fault_level = ?"
+                fault_count_sql += " AND f.fault_level = ?"
+                f_params.append(filters['fault_level'])
+                f_count_params.append(filters['fault_level'])
+            if filters.get('status'):
+                fault_sql += " AND f.processing_status = ?"
+                fault_count_sql += " AND f.processing_status = ?"
+                f_params.append(filters['status'])
+                f_count_params.append(filters['status'])
+            if filters.get('start_date'):
+                fault_sql += " AND f.created_at >= ?"
+                fault_count_sql += " AND f.created_at >= ?"
+                f_params.append(filters['start_date'])
+                f_count_params.append(filters['start_date'])
+            if filters.get('end_date'):
+                fault_sql += " AND f.created_at <= ?"
+                fault_count_sql += " AND f.created_at <= ?"
+                f_params.append(filters['end_date'])
+                f_count_params.append(filters['end_date'])
+        
+        fault_sql, fault_count_sql, f_params, f_count_params = WorkbenchService._apply_role_filter_faults(
+            fault_sql, fault_count_sql, f_params, f_count_params, user_role, user_id
+        )
+        
+        fault_sql += " ORDER BY f.created_at DESC LIMIT ? OFFSET ?"
+        f_params.extend([page_size, (page - 1) * page_size])
+        
+        fault_total = dict_fetch_one(fault_count_sql, f_count_params)['cnt'] if f_count_params else dict_fetch_one(fault_count_sql)['cnt']
+        faults = dict_fetch_all(fault_sql, f_params)
+        
+        for f in faults:
+            items.append(WorkbenchService._format_fault_item(
+                f, WorkbenchService.CATEGORY_ESCALATED,
+                WorkbenchService.CATEGORY_LABELS[WorkbenchService.CATEGORY_ESCALATED]
+            ))
+        
+        items.sort(key=lambda x: x['created_at'], reverse=True)
+        
+        return {'total': order_total + fault_total, 'items': items}
+
+    @staticmethod
+    def get_workbench_summary(user_role=None, user_id=None, filters=None):
+        EscalationService.check_all_escalations()
+        
+        categories = []
+        total_pending = 0
+        
+        category_methods = [
+            (WorkbenchService.CATEGORY_PENDING_SELF_CHECK, WorkbenchService.get_pending_self_check),
+            (WorkbenchService.CATEGORY_PENDING_REVIEW, WorkbenchService.get_pending_review),
+            (WorkbenchService.CATEGORY_PENDING_FAULT, WorkbenchService.get_pending_fault),
+            (WorkbenchService.CATEGORY_PENDING_CLOSE_FAULT, WorkbenchService.get_pending_close_fault),
+            (WorkbenchService.CATEGORY_REMINDED, WorkbenchService.get_reminded),
+            (WorkbenchService.CATEGORY_ESCALATED, WorkbenchService.get_escalated),
+        ]
+        
+        for category, method in category_methods:
+            result = method(user_role=user_role, user_id=user_id, filters=filters, page=1, page_size=1)
+            count = result['total']
+            latest_item = result['items'][0] if result['items'] else None
+            
+            total_pending += count
+            
+            categories.append({
+                'category': category,
+                'category_label': WorkbenchService.CATEGORY_LABELS[category],
+                'count': count,
+                'latest_item': latest_item
+            })
+        
+        return {
+            'total_pending': total_pending,
+            'categories': categories
+        }
+
+    @staticmethod
+    def get_workbench_list(user_role=None, user_id=None, filters=None, page=1, page_size=20, category=None):
+        EscalationService.check_all_escalations()
+        
+        if category:
+            category_map = {
+                WorkbenchService.CATEGORY_PENDING_SELF_CHECK: WorkbenchService.get_pending_self_check,
+                WorkbenchService.CATEGORY_PENDING_REVIEW: WorkbenchService.get_pending_review,
+                WorkbenchService.CATEGORY_PENDING_FAULT: WorkbenchService.get_pending_fault,
+                WorkbenchService.CATEGORY_PENDING_CLOSE_FAULT: WorkbenchService.get_pending_close_fault,
+                WorkbenchService.CATEGORY_REMINDED: WorkbenchService.get_reminded,
+                WorkbenchService.CATEGORY_ESCALATED: WorkbenchService.get_escalated,
+            }
+            method = category_map.get(category)
+            if not method:
+                return {'total': 0, 'page': page, 'page_size': page_size, 'items': []}
+            result = method(user_role=user_role, user_id=user_id, filters=filters, page=page, page_size=page_size)
+            return {
+                'total': result['total'],
+                'page': page,
+                'page_size': page_size,
+                'items': result['items']
+            }
+        
+        all_items = []
+        
+        category_methods = [
+            WorkbenchService.get_pending_self_check,
+            WorkbenchService.get_pending_review,
+            WorkbenchService.get_pending_fault,
+            WorkbenchService.get_pending_close_fault,
+            WorkbenchService.get_reminded,
+            WorkbenchService.get_escalated,
+        ]
+        
+        for method in category_methods:
+            result = method(user_role=user_role, user_id=user_id, filters=filters, page=1, page_size=1000)
+            all_items.extend(result['items'])
+        
+        all_items.sort(key=lambda x: x['created_at'], reverse=True)
+        
+        total = len(all_items)
+        start = (page - 1) * page_size
+        end = start + page_size
+        paginated_items = all_items[start:end]
+        
+        return {
+            'total': total,
+            'page': page,
+            'page_size': page_size,
+            'items': paginated_items
+        }
