@@ -354,7 +354,7 @@ class StatisticsService:
             sql += " AND o.projectionist_id = ?"
             params.append(user_id)
         elif user_role == 'reviewer':
-            sql += " AND (o.reviewer_id IS NULL OR o.reviewer_id = ?)"
+            sql += " AND o.reviewer_id = ?"
             params.append(user_id)
 
         sql += " ORDER BY o.review_deadline ASC NULLS LAST, o.id DESC"
