@@ -8,11 +8,14 @@ from inspection.serializers import (
     HallSerializer, TemplateSerializer,
     InspectionOrderCreateSerializer, SelfCheckSubmitSerializer,
     ReviewSubmitSerializer, InspectionOrderSerializer,
-    OrderListFilterSerializer
+    OrderListFilterSerializer,
+    FaultListFilterSerializer, FaultAssignSerializer, FaultProgressSerializer,
+    FaultTempSolutionSerializer, FaultReviewSerializer, FaultCloseSerializer,
+    FaultReopenSerializer, FaultSerializer
 )
 from inspection.services import (
     HallService, TemplateService, InspectionOrderService,
-    StatisticsService, AlertService
+    StatisticsService, AlertService, FaultService
 )
 
 
@@ -275,7 +278,9 @@ class StatisticsOverviewView(APIView):
         return Response({
             'high_fault_devices': StatisticsService.high_fault_devices(days=days, limit=10),
             'pending_review_tasks': StatisticsService.pending_review_tasks(),
-            'hall_stability_rates': StatisticsService.hall_stability_rate(days=days)
+            'hall_stability_rates': StatisticsService.hall_stability_rate(days=days),
+            'fault_closed_loop': StatisticsService.fault_closed_loop_overview(days=days),
+            'pending_fault_tasks': StatisticsService.pending_fault_tasks()
         })
 
 
@@ -322,3 +327,263 @@ class RoleChoicesView(APIView):
             'projectionist': '放映员',
             'reviewer': '技术复核员'
         })
+
+
+class FaultProcessingStatusChoicesView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        return Response(FaultService.STATUS_CHOICES)
+
+
+class FaultListView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        serializer = FaultListFilterSerializer(data=request.query_params)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        filters = {}
+        for key in ['hall_id', 'fault_level', 'processing_status', 'is_closed',
+                    'assigned_to_id', 'handler_id', 'order_id', 'start_date', 'end_date']:
+            if key in serializer.validated_data and serializer.validated_data[key] is not None:
+                filters[key] = serializer.validated_data[key]
+
+        page = serializer.validated_data.get('page', 1)
+        page_size = serializer.validated_data.get('page_size', 20)
+
+        result = FaultService.list(filters=filters, page=page, page_size=page_size)
+        return Response(result)
+
+
+class FaultPendingListView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        items = FaultService.list_pending(
+            user_role=request.user.role,
+            user_id=request.user.id
+        )
+        return Response({
+            'total': len(items),
+            'items': items
+        })
+
+
+class FaultDetailView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk):
+        fault = FaultService.get_by_id(pk)
+        if not fault:
+            return Response({'error': '故障记录不存在'}, status=status.HTTP_404_NOT_FOUND)
+        return Response(fault)
+
+
+class FaultAssignView(APIView):
+    permission_classes = [IsAdmin]
+
+    def post(self, request, pk):
+        fault = FaultService.get_by_id(pk)
+        if not fault:
+            return Response({'error': '故障记录不存在'}, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = FaultAssignSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            fault = FaultService.assign_fault(
+                fault_id=pk,
+                assigned_to_id=serializer.validated_data['assigned_to_id'],
+                assigned_to_name=serializer.validated_data['assigned_to_name'],
+                operator_id=request.user.id,
+                operator_name=request.user.real_name or request.user.username
+            )
+            return Response(fault)
+        except ValueError as e:
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class FaultAddProgressView(APIView):
+    permission_classes = [IsAdminOrProjectionist]
+
+    def post(self, request, pk):
+        fault = FaultService.get_by_id(pk)
+        if not fault:
+            return Response({'error': '故障记录不存在'}, status=status.HTTP_404_NOT_FOUND)
+
+        if request.user.role == 'projectionist':
+            assigned_id = fault.get('assigned_to_id')
+            handler_id = fault.get('handler_id')
+            if assigned_id != request.user.id and handler_id != request.user.id:
+                return Response({'error': '您不是该故障的处理人员，无权添加进展'},
+                                status=status.HTTP_403_FORBIDDEN)
+
+        serializer = FaultProgressSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            fault = FaultService.add_progress(
+                fault_id=pk,
+                progress_note=serializer.validated_data['progress_note'],
+                operator_id=request.user.id,
+                operator_name=request.user.real_name or request.user.username,
+                operator_role=request.user.role
+            )
+            return Response(fault)
+        except ValueError as e:
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class FaultUpdateTempSolutionView(APIView):
+    permission_classes = [IsAdminOrProjectionist]
+
+    def post(self, request, pk):
+        fault = FaultService.get_by_id(pk)
+        if not fault:
+            return Response({'error': '故障记录不存在'}, status=status.HTTP_404_NOT_FOUND)
+
+        if request.user.role == 'projectionist':
+            assigned_id = fault.get('assigned_to_id')
+            handler_id = fault.get('handler_id')
+            if assigned_id != request.user.id and handler_id != request.user.id:
+                return Response({'error': '您不是该故障的处理人员，无权更新解决方案'},
+                                status=status.HTTP_403_FORBIDDEN)
+
+        serializer = FaultTempSolutionSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            fault = FaultService.update_temp_solution(
+                fault_id=pk,
+                temp_solution=serializer.validated_data['temp_solution'],
+                operator_id=request.user.id,
+                operator_name=request.user.real_name or request.user.username,
+                operator_role=request.user.role
+            )
+            return Response(fault)
+        except ValueError as e:
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class FaultSubmitForReviewView(APIView):
+    permission_classes = [IsAdminOrProjectionist]
+
+    def post(self, request, pk):
+        fault = FaultService.get_by_id(pk)
+        if not fault:
+            return Response({'error': '故障记录不存在'}, status=status.HTTP_404_NOT_FOUND)
+
+        if request.user.role == 'projectionist':
+            assigned_id = fault.get('assigned_to_id')
+            handler_id = fault.get('handler_id')
+            if assigned_id != request.user.id and handler_id != request.user.id:
+                return Response({'error': '您不是该故障的处理人员，无权提交复核'},
+                                status=status.HTTP_403_FORBIDDEN)
+
+        try:
+            fault = FaultService.submit_for_review(
+                fault_id=pk,
+                operator_id=request.user.id,
+                operator_name=request.user.real_name or request.user.username,
+                operator_role=request.user.role
+            )
+            return Response(fault)
+        except ValueError as e:
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class FaultReviewView(APIView):
+    permission_classes = [IsAdminOrReviewer]
+
+    def post(self, request, pk):
+        fault = FaultService.get_by_id(pk)
+        if not fault:
+            return Response({'error': '故障记录不存在'}, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = FaultReviewSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            fault = FaultService.submit_review(
+                fault_id=pk,
+                review_result=serializer.validated_data['review_result'],
+                final_conclusion=serializer.validated_data.get('final_conclusion'),
+                reviewer_id=request.user.id,
+                reviewer_name=request.user.real_name or request.user.username
+            )
+            return Response(fault)
+        except ValueError as e:
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class FaultCloseView(APIView):
+    permission_classes = [IsAdminOrReviewer]
+
+    def post(self, request, pk):
+        fault = FaultService.get_by_id(pk)
+        if not fault:
+            return Response({'error': '故障记录不存在'}, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = FaultCloseSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            fault = FaultService.close_fault(
+                fault_id=pk,
+                operator_id=request.user.id,
+                operator_name=request.user.real_name or request.user.username,
+                operator_role=request.user.role,
+                close_note=serializer.validated_data.get('close_note')
+            )
+            return Response(fault)
+        except ValueError as e:
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class FaultReopenView(APIView):
+    permission_classes = [IsAdminOrReviewer]
+
+    def post(self, request, pk):
+        fault = FaultService.get_by_id(pk)
+        if not fault:
+            return Response({'error': '故障记录不存在'}, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = FaultReopenSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            fault = FaultService.reopen_fault(
+                fault_id=pk,
+                operator_id=request.user.id,
+                operator_name=request.user.real_name or request.user.username,
+                operator_role=request.user.role,
+                reason=serializer.validated_data.get('reason')
+            )
+            return Response(fault)
+        except ValueError as e:
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class StatisticsClosedLoopView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        days = int(request.query_params.get('days', 30))
+        data = StatisticsService.fault_closed_loop_overview(days=days)
+        return Response(data)
+
+
+class StatisticsPendingFaultsView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        data = StatisticsService.pending_fault_tasks()
+        return Response(data)

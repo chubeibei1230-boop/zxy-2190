@@ -40,7 +40,75 @@ def ensure_duckdb_initialized():
         if _initialized:
             return
         _init_tables()
+        _migrate_tables()
         _initialized = True
+
+
+def _column_exists(table_name, column_name):
+    conn = get_connection()
+    try:
+        result = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+        columns = [row[1] for row in result]
+        return column_name in columns
+    except Exception:
+        return False
+
+
+def _add_column_if_not_exists(table_name, column_def):
+    conn = get_connection()
+    column_name = column_def.strip().split()[0]
+    if not _column_exists(table_name, column_name):
+        try:
+            conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_def}")
+        except Exception:
+            pass
+
+
+def _migrate_tables():
+    global _connection
+    if _connection is None:
+        _connection = _safe_connect()
+    conn = _connection
+
+    try:
+        conn.execute("CREATE SEQUENCE IF NOT EXISTS fault_progress_log_seq START 1")
+    except Exception:
+        pass
+
+    _add_column_if_not_exists("fault_records", "processing_status VARCHAR DEFAULT 'pending'")
+    _add_column_if_not_exists("fault_records", "assigned_to_id INTEGER")
+    _add_column_if_not_exists("fault_records", "assigned_to_name VARCHAR")
+    _add_column_if_not_exists("fault_records", "latest_progress VARCHAR")
+    _add_column_if_not_exists("fault_records", "temp_solution_updated VARCHAR")
+    _add_column_if_not_exists("fault_records", "reviewer_id INTEGER")
+    _add_column_if_not_exists("fault_records", "reviewer_name VARCHAR")
+    _add_column_if_not_exists("fault_records", "review_result VARCHAR")
+    _add_column_if_not_exists("fault_records", "final_conclusion VARCHAR")
+    _add_column_if_not_exists("fault_records", "reviewed_at TIMESTAMP")
+    _add_column_if_not_exists("fault_records", "closed_by_id INTEGER")
+    _add_column_if_not_exists("fault_records", "closed_by_name VARCHAR")
+    _add_column_if_not_exists("fault_records", "closed_at TIMESTAMP")
+    _add_column_if_not_exists("fault_records", "is_closed BOOLEAN DEFAULT FALSE")
+    _add_column_if_not_exists("fault_records", "closed_loop BOOLEAN DEFAULT FALSE")
+    _add_column_if_not_exists("fault_records", "updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+
+    try:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS fault_progress_logs (
+                id INTEGER PRIMARY KEY DEFAULT nextval('fault_progress_log_seq'),
+                fault_id INTEGER NOT NULL,
+                operator_id INTEGER,
+                operator_name VARCHAR,
+                operator_role VARCHAR,
+                action_type VARCHAR NOT NULL,
+                action_detail VARCHAR,
+                from_status VARCHAR,
+                to_status VARCHAR,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+    except Exception:
+        pass
 
 
 def next_val(seq_name):
@@ -131,7 +199,39 @@ def _init_tables():
             solution VARCHAR,
             handler_id INTEGER,
             handler_name VARCHAR,
+            processing_status VARCHAR DEFAULT 'pending',
+            assigned_to_id INTEGER,
+            assigned_to_name VARCHAR,
+            latest_progress VARCHAR,
+            temp_solution_updated VARCHAR,
+            reviewer_id INTEGER,
+            reviewer_name VARCHAR,
+            review_result VARCHAR,
+            final_conclusion VARCHAR,
+            reviewed_at TIMESTAMP,
+            closed_by_id INTEGER,
+            closed_by_name VARCHAR,
+            closed_at TIMESTAMP,
+            is_closed BOOLEAN DEFAULT FALSE,
+            closed_loop BOOLEAN DEFAULT FALSE,
             resolved_at TIMESTAMP,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    conn.execute("CREATE SEQUENCE IF NOT EXISTS fault_progress_log_seq START 1")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS fault_progress_logs (
+            id INTEGER PRIMARY KEY DEFAULT nextval('fault_progress_log_seq'),
+            fault_id INTEGER NOT NULL,
+            operator_id INTEGER,
+            operator_name VARCHAR,
+            operator_role VARCHAR,
+            action_type VARCHAR NOT NULL,
+            action_detail VARCHAR,
+            from_status VARCHAR,
+            to_status VARCHAR,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)

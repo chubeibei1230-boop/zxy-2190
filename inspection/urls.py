@@ -22,10 +22,24 @@ urlpatterns = [
     path('statistics/pending-review/', views.StatisticsPendingReviewView.as_view(), name='stats-pending-review'),
     path('statistics/hall-stability/', views.StatisticsHallStabilityView.as_view(), name='stats-hall-stability'),
     path('statistics/overview/', views.StatisticsOverviewView.as_view(), name='stats-overview'),
+    path('statistics/closed-loop/', views.StatisticsClosedLoopView.as_view(), name='stats-closed-loop'),
+    path('statistics/pending-faults/', views.StatisticsPendingFaultsView.as_view(), name='stats-pending-faults'),
     
     path('alerts/', views.AlertListView.as_view(), name='alert-list'),
     
     path('choices/status/', views.OrderStatusChoicesView.as_view(), name='choices-status'),
     path('choices/fault-level/', views.FaultLevelChoicesView.as_view(), name='choices-fault-level'),
     path('choices/roles/', views.RoleChoicesView.as_view(), name='choices-roles'),
+    path('choices/fault-processing-status/', views.FaultProcessingStatusChoicesView.as_view(), name='choices-fault-processing-status'),
+    
+    path('faults/', views.FaultListView.as_view(), name='fault-list'),
+    path('faults/pending/', views.FaultPendingListView.as_view(), name='fault-pending-list'),
+    path('faults/<int:pk>/', views.FaultDetailView.as_view(), name='fault-detail'),
+    path('faults/<int:pk>/assign/', views.FaultAssignView.as_view(), name='fault-assign'),
+    path('faults/<int:pk>/progress/', views.FaultAddProgressView.as_view(), name='fault-add-progress'),
+    path('faults/<int:pk>/temp-solution/', views.FaultUpdateTempSolutionView.as_view(), name='fault-update-temp-solution'),
+    path('faults/<int:pk>/submit-review/', views.FaultSubmitForReviewView.as_view(), name='fault-submit-review'),
+    path('faults/<int:pk>/review/', views.FaultReviewView.as_view(), name='fault-review'),
+    path('faults/<int:pk>/close/', views.FaultCloseView.as_view(), name='fault-close'),
+    path('faults/<int:pk>/reopen/', views.FaultReopenView.as_view(), name='fault-reopen'),
 ]

@@ -117,3 +117,91 @@ class OrderListFilterSerializer(serializers.Serializer):
     end_date = serializers.DateTimeField(required=False)
     page = serializers.IntegerField(default=1, required=False)
     page_size = serializers.IntegerField(default=20, required=False)
+
+
+class FaultListFilterSerializer(serializers.Serializer):
+    hall_id = serializers.IntegerField(required=False)
+    fault_level = serializers.CharField(required=False)
+    processing_status = serializers.CharField(required=False)
+    is_closed = serializers.BooleanField(required=False, allow_null=True)
+    assigned_to_id = serializers.IntegerField(required=False)
+    handler_id = serializers.IntegerField(required=False)
+    order_id = serializers.IntegerField(required=False)
+    start_date = serializers.DateTimeField(required=False)
+    end_date = serializers.DateTimeField(required=False)
+    page = serializers.IntegerField(default=1, required=False)
+    page_size = serializers.IntegerField(default=20, required=False)
+
+
+class FaultAssignSerializer(serializers.Serializer):
+    assigned_to_id = serializers.IntegerField()
+    assigned_to_name = serializers.CharField(max_length=50)
+
+
+class FaultProgressSerializer(serializers.Serializer):
+    progress_note = serializers.CharField()
+
+
+class FaultTempSolutionSerializer(serializers.Serializer):
+    temp_solution = serializers.CharField()
+
+
+class FaultReviewSerializer(serializers.Serializer):
+    review_result = serializers.BooleanField()
+    final_conclusion = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+
+
+class FaultCloseSerializer(serializers.Serializer):
+    close_note = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+
+
+class FaultReopenSerializer(serializers.Serializer):
+    reason = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+
+
+class FaultProgressLogSerializer(serializers.Serializer):
+    id = serializers.IntegerField(read_only=True)
+    fault_id = serializers.IntegerField(read_only=True)
+    operator_id = serializers.IntegerField(allow_null=True, required=False)
+    operator_name = serializers.CharField(allow_null=True, required=False)
+    operator_role = serializers.CharField(allow_null=True, required=False)
+    action_type = serializers.CharField(read_only=True)
+    action_detail = serializers.CharField(allow_null=True, required=False)
+    from_status = serializers.CharField(allow_null=True, required=False)
+    to_status = serializers.CharField(allow_null=True, required=False)
+    created_at = serializers.DateTimeField(read_only=True)
+
+
+class FaultSerializer(serializers.Serializer):
+    id = serializers.IntegerField(read_only=True)
+    order_id = serializers.IntegerField()
+    hall_id = serializers.IntegerField()
+    hall_code = serializers.CharField(required=False, allow_null=True)
+    hall_name = serializers.CharField(required=False, allow_null=True)
+    session_no = serializers.CharField(required=False, allow_null=True)
+    projector_model = serializers.CharField(required=False, allow_null=True)
+    fault_type = serializers.CharField(required=False, allow_null=True)
+    fault_level = serializers.CharField(required=False, allow_null=True)
+    description = serializers.CharField(required=False, allow_null=True)
+    solution = serializers.CharField(required=False, allow_null=True)
+    handler_id = serializers.IntegerField(allow_null=True, required=False)
+    handler_name = serializers.CharField(required=False, allow_null=True)
+    processing_status = serializers.CharField(required=False)
+    assigned_to_id = serializers.IntegerField(allow_null=True, required=False)
+    assigned_to_name = serializers.CharField(required=False, allow_null=True)
+    latest_progress = serializers.CharField(required=False, allow_null=True)
+    temp_solution_updated = serializers.CharField(required=False, allow_null=True)
+    reviewer_id = serializers.IntegerField(allow_null=True, required=False)
+    reviewer_name = serializers.CharField(required=False, allow_null=True)
+    review_result = serializers.CharField(required=False, allow_null=True)
+    final_conclusion = serializers.CharField(required=False, allow_null=True)
+    reviewed_at = serializers.DateTimeField(required=False, allow_null=True)
+    closed_by_id = serializers.IntegerField(allow_null=True, required=False)
+    closed_by_name = serializers.CharField(required=False, allow_null=True)
+    closed_at = serializers.DateTimeField(required=False, allow_null=True)
+    is_closed = serializers.BooleanField(required=False)
+    closed_loop = serializers.BooleanField(required=False)
+    resolved_at = serializers.DateTimeField(required=False, allow_null=True)
+    progress_logs = FaultProgressLogSerializer(many=True, read_only=True, required=False)
+    created_at = serializers.DateTimeField(read_only=True)
+    updated_at = serializers.DateTimeField(read_only=True)

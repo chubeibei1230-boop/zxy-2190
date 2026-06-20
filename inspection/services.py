@@ -151,7 +151,23 @@ class InspectionOrderService:
 
     @staticmethod
     def get_by_id(order_id):
-        return dict_fetch_one("SELECT * FROM inspection_orders WHERE id = ?", [order_id])
+        order = dict_fetch_one("SELECT * FROM inspection_orders WHERE id = ?", [order_id])
+        if order:
+            faults = FaultService.get_by_order_id(order_id)
+            order['fault_records'] = faults
+            closed_count = sum(1 for f in faults if f.get('closed_loop'))
+            total_count = len(faults)
+            if total_count > 0:
+                order['fault_closed_loop_count'] = closed_count
+                order['fault_total_count'] = total_count
+                order['fault_all_closed'] = closed_count == total_count
+                order['fault_closed_loop_rate'] = round(closed_count / total_count * 100, 2)
+            else:
+                order['fault_closed_loop_count'] = 0
+                order['fault_total_count'] = 0
+                order['fault_all_closed'] = True
+                order['fault_closed_loop_rate'] = 0.0
+        return order
 
     @staticmethod
     def list(filters=None, page=1, page_size=20):
@@ -239,11 +255,15 @@ class InspectionOrderService:
         
         if has_fault:
             hall = HallService.get_by_id(order['hall_id'])
-            insert_returning_id(
-                """INSERT INTO fault_records (order_id, hall_id, projector_model, fault_type, fault_level, description, solution)
-                   VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id""",
-                [order_id, order['hall_id'], hall['projector_model'] if hall else None,
-                 'self_check_fault', fault_level, fault_description, temp_solution]
+            FaultService.create_from_self_check(
+                order_id=order_id,
+                hall_id=order['hall_id'],
+                projector_model=hall['projector_model'] if hall else None,
+                fault_level=fault_level,
+                description=fault_description,
+                solution=temp_solution,
+                handler_id=order.get('projectionist_id'),
+                handler_name=order.get('projectionist_name')
             )
         
         return InspectionOrderService.get_by_id(order_id)
@@ -289,7 +309,9 @@ class StatisticsService:
         start_date = datetime.now() - timedelta(days=days)
         result = dict_fetch_all(
             """SELECT projector_model, COUNT(*) as fault_count, 
-               COUNT(DISTINCT hall_id) as affected_halls
+               COUNT(DISTINCT hall_id) as affected_halls,
+               SUM(CASE WHEN closed_loop = TRUE THEN 1 ELSE 0 END) as closed_count,
+               SUM(CASE WHEN is_closed = FALSE THEN 1 ELSE 0 END) as pending_count
                FROM fault_records
                WHERE created_at >= ?
                GROUP BY projector_model
@@ -297,6 +319,10 @@ class StatisticsService:
                LIMIT ?""",
             [start_date, limit]
         )
+        for r in result:
+            total = r['fault_count']
+            closed = r.get('closed_count', 0)
+            r['closed_loop_rate'] = round(closed / total * 100, 2) if total > 0 else 0.0
         return result
 
     @staticmethod
@@ -331,6 +357,16 @@ class StatisticsService:
             [start_date]
         )
         
+        fault_stats = dict_fetch_all(
+            """SELECT hall_id, COUNT(*) as fault_total,
+               SUM(CASE WHEN closed_loop = TRUE THEN 1 ELSE 0 END) as fault_closed
+               FROM fault_records
+               WHERE created_at >= ?
+               GROUP BY hall_id""",
+            [start_date]
+        )
+        fault_map = {f['hall_id']: f for f in fault_stats}
+        
         ready_map = {r['hall_id']: r['ready_count'] for r in ready_orders}
         
         result = []
@@ -338,15 +374,35 @@ class StatisticsService:
             total = item['total_count']
             ready = ready_map.get(item['hall_id'], 0)
             rate = (ready / total * 100) if total > 0 else 0
-            result.append({
+            entry = {
                 'hall_id': item['hall_id'],
                 'hall_code': item['hall_code'],
                 'total_count': total,
                 'ready_count': ready,
                 'stability_rate': round(rate, 2)
-            })
+            }
+            fs = fault_map.get(item['hall_id'])
+            if fs:
+                ft = fs['fault_total']
+                fc = fs['fault_closed']
+                entry['fault_total'] = ft
+                entry['fault_closed'] = ft - (ft - fc)
+                entry['fault_closed_loop_rate'] = round(fc / ft * 100, 2) if ft > 0 else 0.0
+            else:
+                entry['fault_total'] = 0
+                entry['fault_closed'] = 0
+                entry['fault_closed_loop_rate'] = 0.0
+            result.append(entry)
         
         return result
+
+    @staticmethod
+    def fault_closed_loop_overview(days=30):
+        return FaultService.get_closed_loop_stats(days=days)
+
+    @staticmethod
+    def pending_fault_tasks():
+        return FaultService.list_pending()
 
 
 class AlertService:
@@ -456,5 +512,620 @@ class AlertService:
                     'message': f"型号 {model} 近{settings.FAULT_CONCENTRATION_DAYS}天故障集中",
                     'projector_model': model
                 })
+
+        fault_alerts = FaultService.get_pending_fault_alerts()
+        alerts.extend(fault_alerts)
+
+        pending_count = FaultService.list(filters={'is_closed': False}, page_size=1)['total']
+        if pending_count > 0:
+            closed_loop_stats = FaultService.get_closed_loop_stats(days=7)
+            alerts.append({
+                'type': 'fault_summary',
+                'level': 'info',
+                'message': f"当前有 {pending_count} 个待处理故障，近7天闭环率 {closed_loop_stats['closed_loop_rate']}%",
+                'meta': {
+                    'pending_count': pending_count,
+                    'closed_loop_rate': closed_loop_stats['closed_loop_rate'],
+                    'total_7d': closed_loop_stats['total_faults'],
+                    'closed_7d': closed_loop_stats['closed_faults']
+                }
+            })
         
+        return alerts
+
+
+class FaultService:
+    STATUS_PENDING = 'pending'
+    STATUS_ASSIGNED = 'assigned'
+    STATUS_PROCESSING = 'processing'
+    STATUS_TEMP_SOLVED = 'temp_solved'
+    STATUS_REVIEWING = 'reviewing'
+    STATUS_CLOSED = 'closed'
+
+    STATUS_CHOICES = {
+        STATUS_PENDING: '待处理',
+        STATUS_ASSIGNED: '已指派',
+        STATUS_PROCESSING: '处理中',
+        STATUS_TEMP_SOLVED: '临时解决',
+        STATUS_REVIEWING: '复核中',
+        STATUS_CLOSED: '已关闭'
+    }
+
+    ACTION_CREATE = 'create'
+    ACTION_ASSIGN = 'assign'
+    ACTION_ADD_PROGRESS = 'add_progress'
+    ACTION_UPDATE_TEMP_SOLUTION = 'update_temp_solution'
+    ACTION_SUBMIT_FOR_REVIEW = 'submit_for_review'
+    ACTION_REVIEW = 'review'
+    ACTION_CLOSE = 'close'
+    ACTION_REOPEN = 'reopen'
+
+    @staticmethod
+    def _log_progress(fault_id, operator_id, operator_name, operator_role,
+                      action_type, action_detail=None, from_status=None, to_status=None):
+        insert_returning_id(
+            """INSERT INTO fault_progress_logs 
+               (fault_id, operator_id, operator_name, operator_role, 
+                action_type, action_detail, from_status, to_status)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id""",
+            [fault_id, operator_id, operator_name, operator_role,
+             action_type, action_detail, from_status, to_status]
+        )
+
+    @staticmethod
+    def create_from_self_check(order_id, hall_id, projector_model, fault_level,
+                               description, solution=None, handler_id=None, handler_name=None):
+        new_id = insert_returning_id(
+            """INSERT INTO fault_records 
+               (order_id, hall_id, projector_model, fault_type, fault_level, 
+                description, solution, handler_id, handler_name, processing_status)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id""",
+            [order_id, hall_id, projector_model, 'self_check_fault', fault_level,
+             description, solution, handler_id, handler_name, FaultService.STATUS_PENDING]
+        )
+        FaultService._log_progress(
+            fault_id=new_id,
+            operator_id=handler_id,
+            operator_name=handler_name,
+            operator_role='projectionist',
+            action_type=FaultService.ACTION_CREATE,
+            action_detail=f"自检发现故障：{description}",
+            from_status=None,
+            to_status=FaultService.STATUS_PENDING
+        )
+        return FaultService.get_by_id(new_id)
+
+    @staticmethod
+    def get_by_id(fault_id):
+        fault = dict_fetch_one("SELECT * FROM fault_records WHERE id = ?", [fault_id])
+        if fault:
+            fault['progress_logs'] = FaultService.get_progress_logs(fault_id)
+            hall = HallService.get_by_id(fault['hall_id'])
+            if hall:
+                fault['hall_code'] = hall['hall_code']
+                fault['hall_name'] = hall.get('hall_name', '')
+                fault['responsible_person'] = hall.get('responsible_person', '')
+        return fault
+
+    @staticmethod
+    def get_progress_logs(fault_id):
+        return dict_fetch_all(
+            """SELECT * FROM fault_progress_logs 
+               WHERE fault_id = ? ORDER BY id ASC""",
+            [fault_id]
+        )
+
+    @staticmethod
+    def list(filters=None, page=1, page_size=20):
+        sql = """SELECT f.*, h.hall_code, h.hall_name, h.responsible_person, 
+                        o.session_no, o.projectionist_name as order_projectionist
+                 FROM fault_records f
+                 LEFT JOIN halls h ON f.hall_id = h.id
+                 LEFT JOIN inspection_orders o ON f.order_id = o.id
+                 WHERE 1=1"""
+        count_sql = "SELECT COUNT(*) as cnt FROM fault_records f WHERE 1=1"
+        params = []
+        count_params = []
+
+        if filters:
+            if filters.get('hall_id'):
+                sql += " AND f.hall_id = ?"
+                count_sql += " AND f.hall_id = ?"
+                params.append(filters['hall_id'])
+                count_params.append(filters['hall_id'])
+            if filters.get('fault_level'):
+                sql += " AND f.fault_level = ?"
+                count_sql += " AND f.fault_level = ?"
+                params.append(filters['fault_level'])
+                count_params.append(filters['fault_level'])
+            if filters.get('processing_status'):
+                sql += " AND f.processing_status = ?"
+                count_sql += " AND f.processing_status = ?"
+                params.append(filters['processing_status'])
+                count_params.append(filters['processing_status'])
+            if filters.get('is_closed') is not None:
+                sql += " AND f.is_closed = ?"
+                count_sql += " AND f.is_closed = ?"
+                params.append(filters['is_closed'])
+                count_params.append(filters['is_closed'])
+            if filters.get('assigned_to_id'):
+                sql += " AND f.assigned_to_id = ?"
+                count_sql += " AND f.assigned_to_id = ?"
+                params.append(filters['assigned_to_id'])
+                count_params.append(filters['assigned_to_id'])
+            if filters.get('handler_id'):
+                sql += " AND f.handler_id = ?"
+                count_sql += " AND f.handler_id = ?"
+                params.append(filters['handler_id'])
+                count_params.append(filters['handler_id'])
+            if filters.get('start_date'):
+                sql += " AND f.created_at >= ?"
+                count_sql += " AND f.created_at >= ?"
+                params.append(filters['start_date'])
+                count_params.append(filters['start_date'])
+            if filters.get('end_date'):
+                sql += " AND f.created_at <= ?"
+                count_sql += " AND f.created_at <= ?"
+                params.append(filters['end_date'])
+                count_params.append(filters['end_date'])
+            if filters.get('order_id'):
+                sql += " AND f.order_id = ?"
+                count_sql += " AND f.order_id = ?"
+                params.append(filters['order_id'])
+                count_params.append(filters['order_id'])
+
+        sql += " ORDER BY f.is_closed ASC, f.id DESC LIMIT ? OFFSET ?"
+        params.extend([page_size, (page - 1) * page_size])
+
+        total = dict_fetch_one(count_sql, count_params)['cnt'] if count_params else dict_fetch_one(count_sql)['cnt']
+        items = dict_fetch_all(sql, params)
+
+        return {
+            'total': total,
+            'page': page,
+            'page_size': page_size,
+            'items': items
+        }
+
+    @staticmethod
+    def list_pending(user_role=None, user_id=None):
+        filters = {'is_closed': False}
+        result = FaultService.list(filters=filters, page_size=100)
+        items = result['items']
+
+        if user_role == 'projectionist' and user_id:
+            items = [f for f in items if f.get('assigned_to_id') == user_id or f.get('handler_id') == user_id]
+        elif user_role == 'reviewer':
+            items = [f for f in items if f['processing_status'] in [
+                FaultService.STATUS_TEMP_SOLVED,
+                FaultService.STATUS_REVIEWING
+            ]]
+
+        return items
+
+    @staticmethod
+    def assign_fault(fault_id, assigned_to_id, assigned_to_name, operator_id, operator_name):
+        fault = FaultService.get_by_id(fault_id)
+        if not fault:
+            raise ValueError("故障记录不存在")
+        if fault['is_closed']:
+            raise ValueError("故障已关闭，无法指派")
+
+        old_status = fault['processing_status']
+        new_status = FaultService.STATUS_ASSIGNED
+
+        execute_update(
+            """UPDATE fault_records SET 
+               assigned_to_id = ?, assigned_to_name = ?, processing_status = ?,
+               updated_at = CURRENT_TIMESTAMP
+               WHERE id = ?""",
+            [assigned_to_id, assigned_to_name, new_status, fault_id]
+        )
+
+        FaultService._log_progress(
+            fault_id=fault_id,
+            operator_id=operator_id,
+            operator_name=operator_name,
+            operator_role='admin',
+            action_type=FaultService.ACTION_ASSIGN,
+            action_detail=f"指派给 {assigned_to_name} 处理",
+            from_status=old_status,
+            to_status=new_status
+        )
+
+        return FaultService.get_by_id(fault_id)
+
+    @staticmethod
+    def add_progress(fault_id, progress_note, operator_id, operator_name, operator_role):
+        fault = FaultService.get_by_id(fault_id)
+        if not fault:
+            raise ValueError("故障记录不存在")
+        if fault['is_closed']:
+            raise ValueError("故障已关闭，无法添加进展")
+
+        old_status = fault['processing_status']
+        new_status = old_status
+        if old_status == FaultService.STATUS_PENDING or old_status == FaultService.STATUS_ASSIGNED:
+            new_status = FaultService.STATUS_PROCESSING
+
+        execute_update(
+            """UPDATE fault_records SET 
+               latest_progress = ?, processing_status = ?,
+               updated_at = CURRENT_TIMESTAMP
+               WHERE id = ?""",
+            [progress_note, new_status, fault_id]
+        )
+
+        FaultService._log_progress(
+            fault_id=fault_id,
+            operator_id=operator_id,
+            operator_name=operator_name,
+            operator_role=operator_role,
+            action_type=FaultService.ACTION_ADD_PROGRESS,
+            action_detail=progress_note,
+            from_status=old_status,
+            to_status=new_status
+        )
+
+        return FaultService.get_by_id(fault_id)
+
+    @staticmethod
+    def update_temp_solution(fault_id, temp_solution, operator_id, operator_name, operator_role):
+        fault = FaultService.get_by_id(fault_id)
+        if not fault:
+            raise ValueError("故障记录不存在")
+        if fault['is_closed']:
+            raise ValueError("故障已关闭，无法更新解决方案")
+
+        old_status = fault['processing_status']
+        new_status = FaultService.STATUS_TEMP_SOLVED
+
+        execute_update(
+            """UPDATE fault_records SET 
+               temp_solution_updated = ?, solution = ?, processing_status = ?,
+               updated_at = CURRENT_TIMESTAMP
+               WHERE id = ?""",
+            [temp_solution, temp_solution, new_status, fault_id]
+        )
+
+        FaultService._log_progress(
+            fault_id=fault_id,
+            operator_id=operator_id,
+            operator_name=operator_name,
+            operator_role=operator_role,
+            action_type=FaultService.ACTION_UPDATE_TEMP_SOLUTION,
+            action_detail=f"补充临时解决方案：{temp_solution}",
+            from_status=old_status,
+            to_status=new_status
+        )
+
+        return FaultService.get_by_id(fault_id)
+
+    @staticmethod
+    def submit_for_review(fault_id, operator_id, operator_name, operator_role):
+        fault = FaultService.get_by_id(fault_id)
+        if not fault:
+            raise ValueError("故障记录不存在")
+        if fault['is_closed']:
+            raise ValueError("故障已关闭，无法提交复核")
+        if fault['processing_status'] not in [FaultService.STATUS_TEMP_SOLVED, FaultService.STATUS_PROCESSING]:
+            raise ValueError("当前状态不允许提交复核，请先补充处理进展或临时解决方案")
+
+        old_status = fault['processing_status']
+        new_status = FaultService.STATUS_REVIEWING
+
+        execute_update(
+            """UPDATE fault_records SET 
+               processing_status = ?, updated_at = CURRENT_TIMESTAMP
+               WHERE id = ?""",
+            [new_status, fault_id]
+        )
+
+        FaultService._log_progress(
+            fault_id=fault_id,
+            operator_id=operator_id,
+            operator_name=operator_name,
+            operator_role=operator_role,
+            action_type=FaultService.ACTION_SUBMIT_FOR_REVIEW,
+            action_detail="提交技术复核员进行复核",
+            from_status=old_status,
+            to_status=new_status
+        )
+
+        return FaultService.get_by_id(fault_id)
+
+    @staticmethod
+    def submit_review(fault_id, review_result, final_conclusion,
+                      reviewer_id, reviewer_name):
+        fault = FaultService.get_by_id(fault_id)
+        if not fault:
+            raise ValueError("故障记录不存在")
+        if fault['is_closed']:
+            raise ValueError("故障已关闭，无法复核")
+        if fault['processing_status'] not in [FaultService.STATUS_REVIEWING, FaultService.STATUS_TEMP_SOLVED]:
+            raise ValueError("当前状态不允许复核")
+
+        result_text = '通过' if review_result else '不通过'
+        detail = f"复核结果：{result_text}"
+        if final_conclusion:
+            detail += f"，最终结论：{final_conclusion}"
+
+        old_status = fault['processing_status']
+        new_status = FaultService.STATUS_REVIEWING
+
+        if review_result:
+            new_status = FaultService.STATUS_CLOSED
+            closed_loop = True
+            is_closed = True
+
+            execute_update(
+                """UPDATE fault_records SET 
+                   review_result = ?, final_conclusion = ?,
+                   reviewer_id = ?, reviewer_name = ?,
+                   reviewed_at = CURRENT_TIMESTAMP,
+                   processing_status = ?, is_closed = ?, closed_loop = ?,
+                   closed_by_id = ?, closed_by_name = ?, closed_at = CURRENT_TIMESTAMP,
+                   resolved_at = CURRENT_TIMESTAMP,
+                   updated_at = CURRENT_TIMESTAMP
+                   WHERE id = ?""",
+                [result_text, final_conclusion,
+                 reviewer_id, reviewer_name,
+                 new_status, is_closed, closed_loop,
+                 reviewer_id, reviewer_name,
+                 fault_id]
+            )
+
+            FaultService._sync_order_status(fault['order_id'])
+        else:
+            new_status = FaultService.STATUS_PROCESSING
+            execute_update(
+                """UPDATE fault_records SET 
+                   review_result = ?, final_conclusion = ?,
+                   reviewer_id = ?, reviewer_name = ?,
+                   reviewed_at = CURRENT_TIMESTAMP,
+                   processing_status = ?,
+                   updated_at = CURRENT_TIMESTAMP
+                   WHERE id = ?""",
+                [result_text, final_conclusion,
+                 reviewer_id, reviewer_name,
+                 new_status,
+                 fault_id]
+            )
+
+        FaultService._log_progress(
+            fault_id=fault_id,
+            operator_id=reviewer_id,
+            operator_name=reviewer_name,
+            operator_role='reviewer',
+            action_type=FaultService.ACTION_REVIEW,
+            action_detail=detail,
+            from_status=old_status,
+            to_status=new_status
+        )
+
+        return FaultService.get_by_id(fault_id)
+
+    @staticmethod
+    def _sync_order_status(order_id):
+        unresolved = dict_fetch_one(
+            """SELECT COUNT(*) as cnt FROM fault_records 
+               WHERE order_id = ? AND is_closed = FALSE""",
+            [order_id]
+        )
+        if unresolved and unresolved['cnt'] == 0:
+            order = InspectionOrderService.get_by_id(order_id)
+            if order and order['status'] == InspectionOrderService.STATUS_FAULT_HANDLING:
+                InspectionOrderService.update_status(
+                    order_id, InspectionOrderService.STATUS_PENDING_REVIEW
+                )
+
+    @staticmethod
+    def close_fault(fault_id, operator_id, operator_name, operator_role, close_note=None):
+        fault = FaultService.get_by_id(fault_id)
+        if not fault:
+            raise ValueError("故障记录不存在")
+        if fault['is_closed']:
+            raise ValueError("故障已关闭")
+
+        old_status = fault['processing_status']
+        new_status = FaultService.STATUS_CLOSED
+
+        execute_update(
+            """UPDATE fault_records SET 
+               processing_status = ?, is_closed = TRUE, closed_loop = TRUE,
+               closed_by_id = ?, closed_by_name = ?, closed_at = CURRENT_TIMESTAMP,
+               resolved_at = CURRENT_TIMESTAMP,
+               final_conclusion = COALESCE(final_conclusion, ?),
+               updated_at = CURRENT_TIMESTAMP
+               WHERE id = ?""",
+            [new_status, operator_id, operator_name, close_note or '管理员关闭', fault_id]
+        )
+
+        detail = close_note or "关闭故障"
+        FaultService._log_progress(
+            fault_id=fault_id,
+            operator_id=operator_id,
+            operator_name=operator_name,
+            operator_role=operator_role,
+            action_type=FaultService.ACTION_CLOSE,
+            action_detail=detail,
+            from_status=old_status,
+            to_status=new_status
+        )
+
+        FaultService._sync_order_status(fault['order_id'])
+        return FaultService.get_by_id(fault_id)
+
+    @staticmethod
+    def reopen_fault(fault_id, operator_id, operator_name, operator_role, reason=None):
+        fault = FaultService.get_by_id(fault_id)
+        if not fault:
+            raise ValueError("故障记录不存在")
+        if not fault['is_closed']:
+            raise ValueError("故障未关闭，无需重新打开")
+
+        old_status = fault['processing_status']
+        new_status = FaultService.STATUS_PROCESSING
+
+        execute_update(
+            """UPDATE fault_records SET 
+               processing_status = ?, is_closed = FALSE, closed_loop = FALSE,
+               closed_by_id = NULL, closed_by_name = NULL, closed_at = NULL,
+               resolved_at = NULL,
+               updated_at = CURRENT_TIMESTAMP
+               WHERE id = ?""",
+            [new_status, fault_id]
+        )
+
+        detail = reason or "重新打开故障"
+        FaultService._log_progress(
+            fault_id=fault_id,
+            operator_id=operator_id,
+            operator_name=operator_name,
+            operator_role=operator_role,
+            action_type=FaultService.ACTION_REOPEN,
+            action_detail=detail,
+            from_status=old_status,
+            to_status=new_status
+        )
+
+        return FaultService.get_by_id(fault_id)
+
+    @staticmethod
+    def get_by_order_id(order_id):
+        faults = dict_fetch_all(
+            """SELECT f.*, h.hall_code, h.hall_name
+               FROM fault_records f
+               LEFT JOIN halls h ON f.hall_id = h.id
+               WHERE f.order_id = ?
+               ORDER BY f.id DESC""",
+            [order_id]
+        )
+        return faults
+
+    @staticmethod
+    def get_closed_loop_stats(days=30):
+        start_date = datetime.now() - timedelta(days=days)
+        total = dict_fetch_one(
+            "SELECT COUNT(*) as cnt FROM fault_records WHERE created_at >= ?",
+            [start_date]
+        )['cnt']
+        closed = dict_fetch_one(
+            "SELECT COUNT(*) as cnt FROM fault_records WHERE created_at >= ? AND closed_loop = TRUE",
+            [start_date]
+        )['cnt']
+        pending = dict_fetch_one(
+            "SELECT COUNT(*) as cnt FROM fault_records WHERE created_at >= ? AND is_closed = FALSE",
+            [start_date]
+        )['cnt']
+        closed_loop_rate = (closed / total * 100) if total > 0 else 0
+
+        by_status = dict_fetch_all(
+            """SELECT processing_status, COUNT(*) as cnt 
+               FROM fault_records 
+               WHERE created_at >= ?
+               GROUP BY processing_status""",
+            [start_date]
+        )
+
+        by_level = dict_fetch_all(
+            """SELECT fault_level, COUNT(*) as total,
+               SUM(CASE WHEN closed_loop = TRUE THEN 1 ELSE 0 END) as closed
+               FROM fault_records
+               WHERE created_at >= ?
+               GROUP BY fault_level""",
+            [start_date]
+        )
+
+        avg_close_hours = None
+        close_times = dict_fetch_all(
+            """SELECT closed_at, created_at FROM fault_records 
+               WHERE created_at >= ? AND closed_loop = TRUE 
+               AND closed_at IS NOT NULL""",
+            [start_date]
+        )
+        if close_times:
+            total_hours = 0
+            for ct in close_times:
+                if ct['closed_at'] and ct['created_at']:
+                    delta = ct['closed_at'] - ct['created_at']
+                    total_hours += delta.total_seconds() / 3600
+            avg_close_hours = round(total_hours / len(close_times), 2)
+
+        return {
+            'period_days': days,
+            'total_faults': total,
+            'closed_faults': closed,
+            'pending_faults': pending,
+            'closed_loop_rate': round(closed_loop_rate, 2),
+            'avg_close_hours': avg_close_hours,
+            'by_status': by_status,
+            'by_level': by_level
+        }
+
+    @staticmethod
+    def get_pending_fault_alerts():
+        alerts = []
+
+        pending_critical = dict_fetch_all(
+            """SELECT f.*, h.hall_code, o.session_no
+               FROM fault_records f
+               LEFT JOIN halls h ON f.hall_id = h.id
+               LEFT JOIN inspection_orders o ON f.order_id = o.id
+               WHERE f.is_closed = FALSE AND f.fault_level = 'critical'
+               ORDER BY f.created_at DESC""",
+            []
+        )
+        for f in pending_critical:
+            alerts.append({
+                'type': 'critical_fault_pending',
+                'level': 'danger',
+                'message': f"严重故障待处理：影厅 {f['hall_code']} 场次 {f['session_no']} - {f['description'][:30]}",
+                'fault_id': f['id'],
+                'order_id': f['order_id'],
+                'hall_id': f['hall_id']
+            })
+
+        stuck_processing = dict_fetch_all(
+            """SELECT f.*, h.hall_code, o.session_no
+               FROM fault_records f
+               LEFT JOIN halls h ON f.hall_id = h.id
+               LEFT JOIN inspection_orders o ON f.order_id = o.id
+               WHERE f.is_closed = FALSE 
+               AND f.processing_status = 'processing'
+               AND f.updated_at < CURRENT_TIMESTAMP - INTERVAL 24 HOUR
+               ORDER BY f.updated_at ASC""",
+            []
+        )
+        for f in stuck_processing:
+            alerts.append({
+                'type': 'fault_stuck_in_processing',
+                'level': 'warning',
+                'message': f"故障处理超过24小时无进展：影厅 {f['hall_code']} 场次 {f['session_no']}",
+                'fault_id': f['id'],
+                'order_id': f['order_id'],
+                'hall_id': f['hall_id']
+            })
+
+        unreviewed = dict_fetch_all(
+            """SELECT f.*, h.hall_code, o.session_no
+               FROM fault_records f
+               LEFT JOIN halls h ON f.hall_id = h.id
+               LEFT JOIN inspection_orders o ON f.order_id = o.id
+               WHERE f.is_closed = FALSE 
+               AND f.processing_status IN ('temp_solved', 'reviewing')
+               AND f.updated_at < CURRENT_TIMESTAMP - INTERVAL 12 HOUR
+               ORDER BY f.updated_at ASC""",
+            []
+        )
+        for f in unreviewed:
+            alerts.append({
+                'type': 'fault_pending_review',
+                'level': 'warning',
+                'message': f"故障待复核超过12小时：影厅 {f['hall_code']} 场次 {f['session_no']}",
+                'fault_id': f['id'],
+                'order_id': f['order_id'],
+                'hall_id': f['hall_id']
+            })
+
         return alerts
