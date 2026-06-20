@@ -167,6 +167,14 @@ class InspectionOrderService:
                 order['fault_total_count'] = 0
                 order['fault_all_closed'] = True
                 order['fault_closed_loop_rate'] = 0.0
+
+            reminder_summary = ReminderService.get_reminder_summary('order', order_id)
+            escalation_summary = EscalationService.get_escalation_summary('order', order_id)
+            order['reminder_info'] = reminder_summary
+            order['escalation_info'] = escalation_summary
+
+            reminders = ReminderService.list_by_target('order', order_id)
+            order['reminder_records'] = reminders
         return order
 
     @staticmethod
@@ -214,6 +222,12 @@ class InspectionOrderService:
         
         total = dict_fetch_one(count_sql, params[:-2])['cnt'] if params[:-2] else dict_fetch_one(count_sql)['cnt']
         items = dict_fetch_all(sql, params)
+
+        for item in items:
+            reminder_summary = ReminderService.get_reminder_summary('order', item['id'])
+            escalation_summary = EscalationService.get_escalation_summary('order', item['id'])
+            item['reminder_info'] = reminder_summary
+            item['escalation_info'] = escalation_summary
         
         return {
             'total': total,
@@ -291,6 +305,8 @@ class InspectionOrderService:
             [new_status, reviewer_id, reviewer_name, recheck_result,
              problem_cause, final_conclusion, order_id]
         )
+
+        EscalationService.resolve_escalation('order', order_id)
         
         return InspectionOrderService.get_by_id(order_id)
 
@@ -336,6 +352,11 @@ class StatisticsService:
                ORDER BY o.review_deadline ASC NULLS LAST, o.id DESC""",
             []
         )
+        for item in result:
+            reminder_summary = ReminderService.get_reminder_summary('order', item['id'])
+            escalation_summary = EscalationService.get_escalation_summary('order', item['id'])
+            item['reminder_info'] = reminder_summary
+            item['escalation_info'] = escalation_summary
         return result
 
     @staticmethod
@@ -401,8 +422,14 @@ class StatisticsService:
         return FaultService.get_closed_loop_stats(days=days)
 
     @staticmethod
-    def pending_fault_tasks():
-        return FaultService.list_pending()
+    def pending_fault_tasks(user_role=None, user_id=None):
+        items = FaultService.list_pending(user_role=user_role, user_id=user_id)
+        for item in items:
+            reminder_summary = ReminderService.get_reminder_summary('fault', item['id'])
+            escalation_summary = EscalationService.get_escalation_summary('fault', item['id'])
+            item['reminder_info'] = reminder_summary
+            item['escalation_info'] = escalation_summary
+        return items
 
 
 class AlertService:
@@ -474,6 +501,37 @@ class AlertService:
     @staticmethod
     def get_all_alerts():
         alerts = []
+
+        EscalationService.check_all_escalations()
+
+        escalated_orders = EscalationService.list_order_escalations_with_details(
+            filters={'is_resolved': False}, page_size=50
+        )['items']
+        for esc in escalated_orders:
+            alerts.append({
+                'type': 'order_escalated',
+                'level': 'danger',
+                'message': f"【超时升级】影厅 {esc.get('hall_code')} 场次 {esc.get('session_no')} 巡检单复核超时",
+                'order_id': esc['target_id'],
+                'escalation_id': esc['id'],
+                'escalation_reason': esc.get('escalation_reason'),
+                'escalated_at': esc.get('escalated_at')
+            })
+
+        escalated_faults = EscalationService.list_fault_escalations_with_details(
+            filters={'is_resolved': False}, page_size=50
+        )['items']
+        for esc in escalated_faults:
+            alerts.append({
+                'type': 'fault_escalated',
+                'level': 'danger',
+                'message': f"【超时升级】影厅 {esc.get('hall_code')} 场次 {esc.get('session_no')} 故障复核超时 - {esc.get('fault_level', '')}",
+                'fault_id': esc['target_id'],
+                'order_id': esc.get('order_id'),
+                'escalation_id': esc['id'],
+                'escalation_reason': esc.get('escalation_reason'),
+                'escalated_at': esc.get('escalated_at')
+            })
         
         timeout_orders = AlertService.check_review_timeout()
         for order in timeout_orders:
@@ -605,6 +663,14 @@ class FaultService:
                 fault['hall_code'] = hall['hall_code']
                 fault['hall_name'] = hall.get('hall_name', '')
                 fault['responsible_person'] = hall.get('responsible_person', '')
+
+            reminder_summary = ReminderService.get_reminder_summary('fault', fault_id)
+            escalation_summary = EscalationService.get_escalation_summary('fault', fault_id)
+            fault['reminder_info'] = reminder_summary
+            fault['escalation_info'] = escalation_summary
+
+            reminders = ReminderService.list_by_target('fault', fault_id)
+            fault['reminder_records'] = reminders
         return fault
 
     @staticmethod
@@ -679,6 +745,12 @@ class FaultService:
 
         total = dict_fetch_one(count_sql, count_params)['cnt'] if count_params else dict_fetch_one(count_sql)['cnt']
         items = dict_fetch_all(sql, params)
+
+        for item in items:
+            reminder_summary = ReminderService.get_reminder_summary('fault', item['id'])
+            escalation_summary = EscalationService.get_escalation_summary('fault', item['id'])
+            item['reminder_info'] = reminder_summary
+            item['escalation_info'] = escalation_summary
 
         return {
             'total': total,
@@ -902,6 +974,9 @@ class FaultService:
             from_status=old_status,
             to_status=new_status
         )
+
+        if review_result:
+            EscalationService.resolve_escalation('fault', fault_id)
 
         return FaultService.get_by_id(fault_id)
 
@@ -1228,3 +1303,473 @@ class FaultService:
             })
 
         return alerts
+
+
+class ReminderService:
+    TARGET_TYPE_ORDER = 'order'
+    TARGET_TYPE_FAULT = 'fault'
+    REMINDER_TYPE_REVIEW = 'review'
+
+    MIN_REMINDER_INTERVAL_MINUTES = 5
+
+    @staticmethod
+    def _check_can_remind_order(order_id):
+        order = InspectionOrderService.get_by_id(order_id)
+        if not order:
+            raise ValueError("巡检单不存在")
+        if order['status'] not in [
+            InspectionOrderService.STATUS_PENDING_REVIEW,
+            InspectionOrderService.STATUS_FAULT_HANDLING
+        ]:
+            raise ValueError("当前状态不允许发起催办，仅待复核或故障处理中状态可催办")
+        return order
+
+    @staticmethod
+    def _check_can_remind_fault(fault_id):
+        fault = FaultService.get_by_id(fault_id)
+        if not fault:
+            raise ValueError("故障记录不存在")
+        if fault['is_closed']:
+            raise ValueError("故障已关闭，无法催办")
+        if fault['processing_status'] not in [
+            FaultService.STATUS_REVIEWING,
+            FaultService.STATUS_TEMP_SOLVED
+        ]:
+            raise ValueError("当前状态不允许发起催办，仅复核中或临时解决状态可催办")
+        return fault
+
+    @staticmethod
+    def _check_duplicate_reminder(target_type, target_id):
+        last_reminder = dict_fetch_one(
+            """SELECT * FROM review_reminders 
+               WHERE target_type = ? AND target_id = ? 
+               ORDER BY id DESC LIMIT 1""",
+            [target_type, target_id]
+        )
+        if last_reminder:
+            created_at = last_reminder['created_at']
+            if created_at:
+                delta = datetime.now() - created_at
+                if delta.total_seconds() < ReminderService.MIN_REMINDER_INTERVAL_MINUTES * 60:
+                    remaining = ReminderService.MIN_REMINDER_INTERVAL_MINUTES * 60 - delta.total_seconds()
+                    raise ValueError(
+                        f"催办过于频繁，请等待 {int(remaining)} 秒后再尝试"
+                    )
+
+    @staticmethod
+    def create_order_reminder(order_id, initiator_id, initiator_name, initiator_role, reminder_note=None):
+        order = ReminderService._check_can_remind_order(order_id)
+        ReminderService._check_duplicate_reminder(
+            ReminderService.TARGET_TYPE_ORDER, order_id
+        )
+
+        new_id = insert_returning_id(
+            """INSERT INTO review_reminders 
+               (target_type, target_id, reminder_type, initiator_id, initiator_name, initiator_role, reminder_note)
+               VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id""",
+            [ReminderService.TARGET_TYPE_ORDER, order_id, ReminderService.REMINDER_TYPE_REVIEW,
+             initiator_id, initiator_name, initiator_role, reminder_note]
+        )
+        return ReminderService.get_by_id(new_id)
+
+    @staticmethod
+    def create_fault_reminder(fault_id, initiator_id, initiator_name, initiator_role, reminder_note=None):
+        fault = ReminderService._check_can_remind_fault(fault_id)
+        ReminderService._check_duplicate_reminder(
+            ReminderService.TARGET_TYPE_FAULT, fault_id
+        )
+
+        new_id = insert_returning_id(
+            """INSERT INTO review_reminders 
+               (target_type, target_id, reminder_type, initiator_id, initiator_name, initiator_role, reminder_note)
+               VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id""",
+            [ReminderService.TARGET_TYPE_FAULT, fault_id, ReminderService.REMINDER_TYPE_REVIEW,
+             initiator_id, initiator_name, initiator_role, reminder_note]
+        )
+        return ReminderService.get_by_id(new_id)
+
+    @staticmethod
+    def get_by_id(reminder_id):
+        return dict_fetch_one("SELECT * FROM review_reminders WHERE id = ?", [reminder_id])
+
+    @staticmethod
+    def list_by_target(target_type, target_id):
+        return dict_fetch_all(
+            """SELECT * FROM review_reminders 
+               WHERE target_type = ? AND target_id = ? 
+               ORDER BY id DESC""",
+            [target_type, target_id]
+        )
+
+    @staticmethod
+    def list(filters=None, page=1, page_size=20):
+        sql = "SELECT * FROM review_reminders WHERE 1=1"
+        count_sql = "SELECT COUNT(*) as cnt FROM review_reminders WHERE 1=1"
+        params = []
+
+        if filters:
+            if filters.get('target_type'):
+                sql += " AND target_type = ?"
+                count_sql += " AND target_type = ?"
+                params.append(filters['target_type'])
+            if filters.get('reminder_type'):
+                sql += " AND reminder_type = ?"
+                count_sql += " AND reminder_type = ?"
+                params.append(filters['reminder_type'])
+            if filters.get('initiator_id'):
+                sql += " AND initiator_id = ?"
+                count_sql += " AND initiator_id = ?"
+                params.append(filters['initiator_id'])
+            if filters.get('start_date'):
+                sql += " AND created_at >= ?"
+                count_sql += " AND created_at >= ?"
+                params.append(filters['start_date'])
+            if filters.get('end_date'):
+                sql += " AND created_at <= ?"
+                count_sql += " AND created_at <= ?"
+                params.append(filters['end_date'])
+
+        sql += " ORDER BY id DESC LIMIT ? OFFSET ?"
+        count_params = params[:]
+        params.extend([page_size, (page - 1) * page_size])
+
+        total = dict_fetch_one(count_sql, count_params)['cnt'] if count_params else dict_fetch_one(count_sql)['cnt']
+        items = dict_fetch_all(sql, params)
+
+        return {
+            'total': total,
+            'page': page,
+            'page_size': page_size,
+            'items': items
+        }
+
+    @staticmethod
+    def get_reminder_summary(target_type, target_id):
+        result = dict_fetch_one(
+            """SELECT 
+               COUNT(*) as reminder_count,
+               MAX(created_at) as last_reminder_at
+               FROM review_reminders 
+               WHERE target_type = ? AND target_id = ?""",
+            [target_type, target_id]
+        )
+        if result:
+            return {
+                'reminder_count': result['reminder_count'] or 0,
+                'last_reminder_at': result['last_reminder_at'],
+                'has_reminder': (result['reminder_count'] or 0) > 0
+            }
+        return {
+            'reminder_count': 0,
+            'last_reminder_at': None,
+            'has_reminder': False
+        }
+
+
+class EscalationService:
+    TARGET_TYPE_ORDER = 'order'
+    TARGET_TYPE_FAULT = 'fault'
+    ESCALATION_TYPE_REVIEW_TIMEOUT = 'review_timeout'
+
+    @staticmethod
+    def get_by_id(escalation_id):
+        return dict_fetch_one("SELECT * FROM review_escalations WHERE id = ?", [escalation_id])
+
+    @staticmethod
+    def get_by_target(target_type, target_id):
+        return dict_fetch_one(
+            """SELECT * FROM review_escalations 
+               WHERE target_type = ? AND target_id = ? AND is_resolved = FALSE
+               ORDER BY id DESC LIMIT 1""",
+            [target_type, target_id]
+        )
+
+    @staticmethod
+    def list(filters=None, page=1, page_size=20):
+        sql = "SELECT * FROM review_escalations WHERE 1=1"
+        count_sql = "SELECT COUNT(*) as cnt FROM review_escalations WHERE 1=1"
+        params = []
+
+        if filters:
+            if filters.get('target_type'):
+                sql += " AND target_type = ?"
+                count_sql += " AND target_type = ?"
+                params.append(filters['target_type'])
+            if filters.get('escalation_type'):
+                sql += " AND escalation_type = ?"
+                count_sql += " AND escalation_type = ?"
+                params.append(filters['escalation_type'])
+            if filters.get('is_resolved') is not None:
+                sql += " AND is_resolved = ?"
+                count_sql += " AND is_resolved = ?"
+                params.append(filters['is_resolved'])
+            if filters.get('start_date'):
+                sql += " AND escalated_at >= ?"
+                count_sql += " AND escalated_at >= ?"
+                params.append(filters['start_date'])
+            if filters.get('end_date'):
+                sql += " AND escalated_at <= ?"
+                count_sql += " AND escalated_at <= ?"
+                params.append(filters['end_date'])
+
+        sql += " ORDER BY is_resolved ASC, escalated_at DESC, id DESC LIMIT ? OFFSET ?"
+        count_params = params[:]
+        params.extend([page_size, (page - 1) * page_size])
+
+        total = dict_fetch_one(count_sql, count_params)['cnt'] if count_params else dict_fetch_one(count_sql)['cnt']
+        items = dict_fetch_all(sql, params)
+
+        return {
+            'total': total,
+            'page': page,
+            'page_size': page_size,
+            'items': items
+        }
+
+    @staticmethod
+    def create_escalation(target_type, target_id, escalation_type, escalation_reason):
+        existing = EscalationService.get_by_target(target_type, target_id)
+        if existing:
+            return existing
+
+        new_id = insert_returning_id(
+            """INSERT INTO review_escalations 
+               (target_type, target_id, escalation_type, escalation_reason, escalated_at)
+               VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP) RETURNING id""",
+            [target_type, target_id, escalation_type, escalation_reason]
+        )
+        return EscalationService.get_by_id(new_id)
+
+    @staticmethod
+    def resolve_escalation(target_type, target_id):
+        escalation = EscalationService.get_by_target(target_type, target_id)
+        if not escalation:
+            return None
+        execute_update(
+            """UPDATE review_escalations SET 
+               is_resolved = TRUE, resolved_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+               WHERE id = ?""",
+            [escalation['id']]
+        )
+        return EscalationService.get_by_id(escalation['id'])
+
+    @staticmethod
+    def check_order_escalation(order_id):
+        order = InspectionOrderService.get_by_id(order_id)
+        if not order:
+            return None
+
+        if order['status'] not in [
+            InspectionOrderService.STATUS_PENDING_REVIEW,
+            InspectionOrderService.STATUS_FAULT_HANDLING
+        ]:
+            EscalationService.resolve_escalation(
+                EscalationService.TARGET_TYPE_ORDER, order_id
+            )
+            return None
+
+        hall = HallService.get_by_id(order['hall_id'])
+        time_limit = hall.get('review_time_limit', 24) if hall else 24
+
+        review_start = order.get('submitted_at') or order.get('created_at')
+        if not review_start:
+            return None
+
+        deadline = review_start + timedelta(hours=time_limit)
+        if datetime.now() > deadline:
+            reason = f"巡检单复核超时，超过影厅规定时限 {time_limit} 小时"
+            return EscalationService.create_escalation(
+                EscalationService.TARGET_TYPE_ORDER,
+                order_id,
+                EscalationService.ESCALATION_TYPE_REVIEW_TIMEOUT,
+                reason
+            )
+        return None
+
+    @staticmethod
+    def check_fault_escalation(fault_id):
+        fault = FaultService.get_by_id(fault_id)
+        if not fault:
+            return None
+
+        if fault['is_closed']:
+            EscalationService.resolve_escalation(
+                EscalationService.TARGET_TYPE_FAULT, fault_id
+            )
+            return None
+
+        if fault['processing_status'] not in [
+            FaultService.STATUS_REVIEWING,
+            FaultService.STATUS_TEMP_SOLVED
+        ]:
+            EscalationService.resolve_escalation(
+                EscalationService.TARGET_TYPE_FAULT, fault_id
+            )
+            return None
+
+        hall = HallService.get_by_id(fault['hall_id']) if fault.get('hall_id') else None
+        time_limit = hall.get('review_time_limit', 24) if hall else 24
+
+        review_start = fault.get('updated_at') or fault.get('created_at')
+        if not review_start:
+            return None
+
+        deadline = review_start + timedelta(hours=time_limit)
+        if datetime.now() > deadline:
+            reason = f"故障复核超时，超过影厅规定时限 {time_limit} 小时"
+            return EscalationService.create_escalation(
+                EscalationService.TARGET_TYPE_FAULT,
+                fault_id,
+                EscalationService.ESCALATION_TYPE_REVIEW_TIMEOUT,
+                reason
+            )
+        return None
+
+    @staticmethod
+    def check_all_escalations():
+        pending_orders = dict_fetch_all(
+            """SELECT id FROM inspection_orders 
+               WHERE status IN ('pending_review', 'fault_handling')""",
+            []
+        )
+        for order in pending_orders:
+            try:
+                EscalationService.check_order_escalation(order['id'])
+            except Exception:
+                pass
+
+        pending_faults = dict_fetch_all(
+            """SELECT id FROM fault_records 
+               WHERE is_closed = FALSE AND processing_status IN ('reviewing', 'temp_solved')""",
+            []
+        )
+        for fault in pending_faults:
+            try:
+                EscalationService.check_fault_escalation(fault['id'])
+            except Exception:
+                pass
+
+    @staticmethod
+    def get_escalation_summary(target_type, target_id):
+        escalation = EscalationService.get_by_target(target_type, target_id)
+        if escalation:
+            return {
+                'is_escalated': True,
+                'escalation_id': escalation['id'],
+                'escalation_type': escalation['escalation_type'],
+                'escalation_reason': escalation['escalation_reason'],
+                'escalated_at': escalation['escalated_at']
+            }
+        return {
+            'is_escalated': False,
+            'escalation_id': None,
+            'escalation_type': None,
+            'escalation_reason': None,
+            'escalated_at': None
+        }
+
+    @staticmethod
+    def list_order_escalations_with_details(filters=None, page=1, page_size=20):
+        base_sql = """
+            SELECT e.*, o.hall_code, o.session_no, o.status as order_status,
+                   o.projectionist_name, o.reviewer_name, h.responsible_person,
+                   h.review_time_limit
+            FROM review_escalations e
+            LEFT JOIN inspection_orders o ON e.target_id = o.id
+            LEFT JOIN halls h ON o.hall_id = h.id
+            WHERE e.target_type = 'order'
+        """
+        count_sql = """
+            SELECT COUNT(*) as cnt FROM review_escalations e
+            LEFT JOIN inspection_orders o ON e.target_id = o.id
+            WHERE e.target_type = 'order'
+        """
+        params = []
+
+        if filters:
+            conditions = []
+            if filters.get('is_resolved') is not None:
+                conditions.append("e.is_resolved = ?")
+                params.append(filters['is_resolved'])
+            if filters.get('hall_id'):
+                conditions.append("o.hall_id = ?")
+                params.append(filters['hall_id'])
+            if filters.get('hall_code'):
+                conditions.append("o.hall_code LIKE ?")
+                params.append(f"%{filters['hall_code']}%")
+
+            if conditions:
+                cond_str = " AND " + " AND ".join(conditions)
+                base_sql += cond_str
+                count_sql += cond_str
+
+        base_sql += " ORDER BY e.is_resolved ASC, e.escalated_at DESC, e.id DESC LIMIT ? OFFSET ?"
+        count_params = params[:]
+        params.extend([page_size, (page - 1) * page_size])
+
+        total = dict_fetch_one(count_sql, count_params)['cnt'] if count_params else dict_fetch_one(count_sql)['cnt']
+        items = dict_fetch_all(base_sql, params)
+
+        return {
+            'total': total,
+            'page': page,
+            'page_size': page_size,
+            'items': items
+        }
+
+    @staticmethod
+    def list_fault_escalations_with_details(filters=None, page=1, page_size=20):
+        base_sql = """
+            SELECT e.*, f.hall_id, f.fault_level, f.description,
+                   f.processing_status as fault_status,
+                   f.assigned_to_name, f.handler_name, f.reviewer_name,
+                   o.session_no, h.hall_code
+            FROM review_escalations e
+            LEFT JOIN fault_records f ON e.target_id = f.id
+            LEFT JOIN inspection_orders o ON f.order_id = o.id
+            LEFT JOIN halls h ON f.hall_id = h.id
+            WHERE e.target_type = 'fault'
+        """
+        count_sql = """
+            SELECT COUNT(*) as cnt FROM review_escalations e
+            LEFT JOIN fault_records f ON e.target_id = f.id
+            WHERE e.target_type = 'fault'
+        """
+        params = []
+
+        if filters:
+            conditions = []
+            if filters.get('is_resolved') is not None:
+                conditions.append("e.is_resolved = ?")
+                params.append(filters['is_resolved'])
+            if filters.get('hall_id'):
+                conditions.append("f.hall_id = ?")
+                params.append(filters['hall_id'])
+            if filters.get('fault_level'):
+                conditions.append("f.fault_level = ?")
+                params.append(filters['fault_level'])
+            if filters.get('assigned_to_id'):
+                conditions.append("f.assigned_to_id = ?")
+                params.append(filters['assigned_to_id'])
+            if filters.get('handler_id'):
+                conditions.append("f.handler_id = ?")
+                params.append(filters['handler_id'])
+
+            if conditions:
+                cond_str = " AND " + " AND ".join(conditions)
+                base_sql += cond_str
+                count_sql += cond_str
+
+        base_sql += " ORDER BY e.is_resolved ASC, e.escalated_at DESC, e.id DESC LIMIT ? OFFSET ?"
+        count_params = params[:]
+        params.extend([page_size, (page - 1) * page_size])
+
+        total = dict_fetch_one(count_sql, count_params)['cnt'] if count_params else dict_fetch_one(count_sql)['cnt']
+        items = dict_fetch_all(base_sql, params)
+
+        return {
+            'total': total,
+            'page': page,
+            'page_size': page_size,
+            'items': items
+        }

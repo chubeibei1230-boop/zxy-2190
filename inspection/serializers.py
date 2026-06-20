@@ -206,3 +206,71 @@ class FaultSerializer(serializers.Serializer):
     progress_logs = FaultProgressLogSerializer(many=True, read_only=True, required=False)
     created_at = serializers.DateTimeField(read_only=True)
     updated_at = serializers.DateTimeField(read_only=True)
+
+
+class ReminderSerializer(serializers.Serializer):
+    id = serializers.IntegerField(read_only=True)
+    target_type = serializers.CharField()
+    target_id = serializers.IntegerField()
+    reminder_type = serializers.CharField()
+    initiator_id = serializers.IntegerField(allow_null=True, required=False)
+    initiator_name = serializers.CharField(allow_null=True, required=False)
+    initiator_role = serializers.CharField(allow_null=True, required=False)
+    reminder_note = serializers.CharField(allow_null=True, required=False, allow_blank=True)
+    created_at = serializers.DateTimeField(read_only=True)
+
+
+class ReminderCreateSerializer(serializers.Serializer):
+    reminder_note = serializers.CharField(required=False, allow_blank=True, allow_null=True, max_length=500)
+
+
+class ReminderListFilterSerializer(serializers.Serializer):
+    target_type = serializers.CharField(required=False)
+    reminder_type = serializers.CharField(required=False)
+    initiator_id = serializers.IntegerField(required=False)
+    start_date = serializers.DateTimeField(required=False)
+    end_date = serializers.DateTimeField(required=False)
+    page = serializers.IntegerField(default=1, required=False)
+    page_size = serializers.IntegerField(default=20, required=False)
+
+
+class EscalationSerializer(serializers.Serializer):
+    id = serializers.IntegerField(read_only=True)
+    target_type = serializers.CharField()
+    target_id = serializers.IntegerField()
+    escalation_type = serializers.CharField()
+    escalation_reason = serializers.CharField(allow_null=True, required=False)
+    escalated_at = serializers.DateTimeField(allow_null=True, required=False)
+    resolved_at = serializers.DateTimeField(allow_null=True, required=False)
+    is_resolved = serializers.BooleanField(required=False)
+    created_at = serializers.DateTimeField(read_only=True)
+    updated_at = serializers.DateTimeField(read_only=True)
+
+
+class EscalationListFilterSerializer(serializers.Serializer):
+    target_type = serializers.CharField(required=False)
+    escalation_type = serializers.CharField(required=False)
+    is_resolved = serializers.BooleanField(required=False, allow_null=True)
+    start_date = serializers.DateTimeField(required=False)
+    end_date = serializers.DateTimeField(required=False)
+    hall_id = serializers.IntegerField(required=False)
+    hall_code = serializers.CharField(required=False)
+    fault_level = serializers.CharField(required=False)
+    assigned_to_id = serializers.IntegerField(required=False)
+    handler_id = serializers.IntegerField(required=False)
+    page = serializers.IntegerField(default=1, required=False)
+    page_size = serializers.IntegerField(default=20, required=False)
+
+
+class ReminderSummarySerializer(serializers.Serializer):
+    has_reminder = serializers.BooleanField()
+    reminder_count = serializers.IntegerField()
+    last_reminder_at = serializers.DateTimeField(allow_null=True, required=False)
+
+
+class EscalationSummarySerializer(serializers.Serializer):
+    is_escalated = serializers.BooleanField()
+    escalation_id = serializers.IntegerField(allow_null=True, required=False)
+    escalation_type = serializers.CharField(allow_null=True, required=False)
+    escalation_reason = serializers.CharField(allow_null=True, required=False)
+    escalated_at = serializers.DateTimeField(allow_null=True, required=False)

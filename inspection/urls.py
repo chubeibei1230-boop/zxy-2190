@@ -42,4 +42,15 @@ urlpatterns = [
     path('faults/<int:pk>/review/', views.FaultReviewView.as_view(), name='fault-review'),
     path('faults/<int:pk>/close/', views.FaultCloseView.as_view(), name='fault-close'),
     path('faults/<int:pk>/reopen/', views.FaultReopenView.as_view(), name='fault-reopen'),
+
+    path('orders/<int:pk>/reminders/', views.OrderReminderListView.as_view(), name='order-reminder-list'),
+    path('orders/<int:pk>/remind/', views.OrderReminderCreateView.as_view(), name='order-reminder-create'),
+    path('faults/<int:pk>/reminders/', views.FaultReminderListView.as_view(), name='fault-reminder-list'),
+    path('faults/<int:pk>/remind/', views.FaultReminderCreateView.as_view(), name='fault-reminder-create'),
+    path('reminders/', views.ReminderListView.as_view(), name='reminder-list'),
+
+    path('escalations/orders/', views.OrderEscalationListView.as_view(), name='escalation-order-list'),
+    path('escalations/faults/', views.FaultEscalationListView.as_view(), name='escalation-fault-list'),
+    path('escalations/check/', views.EscalationCheckView.as_view(), name='escalation-check'),
+    path('reminder-summary/', views.ReminderSummaryView.as_view(), name='reminder-summary'),
 ]

@@ -110,6 +110,51 @@ def _migrate_tables():
     except Exception:
         pass
 
+    try:
+        conn.execute("CREATE SEQUENCE IF NOT EXISTS review_reminder_seq START 1")
+    except Exception:
+        pass
+
+    try:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS review_reminders (
+                id INTEGER PRIMARY KEY DEFAULT nextval('review_reminder_seq'),
+                target_type VARCHAR NOT NULL,
+                target_id INTEGER NOT NULL,
+                reminder_type VARCHAR NOT NULL DEFAULT 'review',
+                initiator_id INTEGER,
+                initiator_name VARCHAR,
+                initiator_role VARCHAR,
+                reminder_note VARCHAR,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+    except Exception:
+        pass
+
+    try:
+        conn.execute("CREATE SEQUENCE IF NOT EXISTS review_escalation_seq START 1")
+    except Exception:
+        pass
+
+    try:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS review_escalations (
+                id INTEGER PRIMARY KEY DEFAULT nextval('review_escalation_seq'),
+                target_type VARCHAR NOT NULL,
+                target_id INTEGER NOT NULL,
+                escalation_type VARCHAR NOT NULL DEFAULT 'review_timeout',
+                escalation_reason VARCHAR,
+                escalated_at TIMESTAMP,
+                resolved_at TIMESTAMP,
+                is_resolved BOOLEAN DEFAULT FALSE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+    except Exception:
+        pass
+
 
 def next_val(seq_name):
     conn = get_connection()
@@ -233,6 +278,37 @@ def _init_tables():
             from_status VARCHAR,
             to_status VARCHAR,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    conn.execute("CREATE SEQUENCE IF NOT EXISTS review_reminder_seq START 1")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS review_reminders (
+            id INTEGER PRIMARY KEY DEFAULT nextval('review_reminder_seq'),
+            target_type VARCHAR NOT NULL,
+            target_id INTEGER NOT NULL,
+            reminder_type VARCHAR NOT NULL DEFAULT 'review',
+            initiator_id INTEGER,
+            initiator_name VARCHAR,
+            initiator_role VARCHAR,
+            reminder_note VARCHAR,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    conn.execute("CREATE SEQUENCE IF NOT EXISTS review_escalation_seq START 1")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS review_escalations (
+            id INTEGER PRIMARY KEY DEFAULT nextval('review_escalation_seq'),
+            target_type VARCHAR NOT NULL,
+            target_id INTEGER NOT NULL,
+            escalation_type VARCHAR NOT NULL DEFAULT 'review_timeout',
+            escalation_reason VARCHAR,
+            escalated_at TIMESTAMP,
+            resolved_at TIMESTAMP,
+            is_resolved BOOLEAN DEFAULT FALSE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
 
