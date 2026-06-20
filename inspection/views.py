@@ -177,6 +177,17 @@ class OrderDetailView(APIView):
         order = InspectionOrderService.get_by_id(pk)
         if not order:
             return Response({'error': '巡检单不存在'}, status=status.HTTP_404_NOT_FOUND)
+
+        if request.user.role == 'projectionist':
+            if order.get('projectionist_id') != request.user.id:
+                return Response({'error': '您无权查看该巡检单详情'},
+                                status=status.HTTP_403_FORBIDDEN)
+        elif request.user.role == 'reviewer':
+            reviewer_id = order.get('reviewer_id')
+            if reviewer_id is not None and reviewer_id != request.user.id:
+                return Response({'error': '您无权查看该巡检单详情'},
+                                status=status.HTTP_403_FORBIDDEN)
+
         return Response(order)
 
 
@@ -261,7 +272,10 @@ class StatisticsPendingReviewView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        data = StatisticsService.pending_review_tasks()
+        data = StatisticsService.pending_review_tasks(
+            user_role=request.user.role,
+            user_id=request.user.id
+        )
         return Response(data)
 
 
@@ -281,7 +295,10 @@ class StatisticsOverviewView(APIView):
         days = int(request.query_params.get('days', 30))
         return Response({
             'high_fault_devices': StatisticsService.high_fault_devices(days=days, limit=10),
-            'pending_review_tasks': StatisticsService.pending_review_tasks(),
+            'pending_review_tasks': StatisticsService.pending_review_tasks(
+                user_role=request.user.role,
+                user_id=request.user.id
+            ),
             'hall_stability_rates': StatisticsService.hall_stability_rate(days=days),
             'fault_closed_loop': StatisticsService.fault_closed_loop_overview(days=days),
             'pending_fault_tasks': StatisticsService.pending_fault_tasks(
@@ -643,6 +660,16 @@ class OrderReminderListView(APIView):
         if not order:
             return Response({'error': '巡检单不存在'}, status=status.HTTP_404_NOT_FOUND)
 
+        if request.user.role == 'projectionist':
+            if order.get('projectionist_id') != request.user.id:
+                return Response({'error': '您无权查看该巡检单的催办记录'},
+                                status=status.HTTP_403_FORBIDDEN)
+        elif request.user.role == 'reviewer':
+            reviewer_id = order.get('reviewer_id')
+            if reviewer_id is not None and reviewer_id != request.user.id:
+                return Response({'error': '您无权查看该巡检单的催办记录'},
+                                status=status.HTTP_403_FORBIDDEN)
+
         reminders = ReminderService.list_by_target('order', pk)
         return Response({
             'total': len(reminders),
@@ -689,6 +716,18 @@ class FaultReminderListView(APIView):
         fault = FaultService.get_by_id(pk)
         if not fault:
             return Response({'error': '故障记录不存在'}, status=status.HTTP_404_NOT_FOUND)
+
+        if request.user.role == 'projectionist':
+            assigned_id = fault.get('assigned_to_id')
+            handler_id = fault.get('handler_id')
+            if assigned_id != request.user.id and handler_id != request.user.id:
+                return Response({'error': '您无权查看该故障的催办记录'},
+                                status=status.HTTP_403_FORBIDDEN)
+        elif request.user.role == 'reviewer':
+            reviewer_id = fault.get('reviewer_id')
+            if reviewer_id is not None and reviewer_id != request.user.id:
+                return Response({'error': '您无权查看该故障的催办记录'},
+                                status=status.HTTP_403_FORBIDDEN)
 
         reminders = ReminderService.list_by_target('fault', pk)
         return Response({

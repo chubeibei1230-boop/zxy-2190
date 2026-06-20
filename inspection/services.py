@@ -342,16 +342,24 @@ class StatisticsService:
         return result
 
     @staticmethod
-    def pending_review_tasks():
-        result = dict_fetch_all(
-            """SELECT o.*, h.responsible_person, h.projector_model
-               FROM inspection_orders o
-               JOIN halls h ON o.hall_id = h.id
-               WHERE o.status = 'pending_review'
-                  OR (o.status = 'fault_handling' AND o.temp_solution IS NOT NULL AND o.temp_solution != '')
-               ORDER BY o.review_deadline ASC NULLS LAST, o.id DESC""",
-            []
-        )
+    def pending_review_tasks(user_role=None, user_id=None):
+        sql = """SELECT o.*, h.responsible_person, h.projector_model
+                 FROM inspection_orders o
+                 JOIN halls h ON o.hall_id = h.id
+                 WHERE (o.status = 'pending_review'
+                    OR (o.status = 'fault_handling' AND o.temp_solution IS NOT NULL AND o.temp_solution != ''))"""
+        params = []
+
+        if user_role == 'projectionist':
+            sql += " AND o.projectionist_id = ?"
+            params.append(user_id)
+        elif user_role == 'reviewer':
+            sql += " AND (o.reviewer_id IS NULL OR o.reviewer_id = ?)"
+            params.append(user_id)
+
+        sql += " ORDER BY o.review_deadline ASC NULLS LAST, o.id DESC"
+
+        result = dict_fetch_all(sql, params)
         for item in result:
             reminder_summary = ReminderService.get_reminder_summary('order', item['id'])
             escalation_summary = EscalationService.get_escalation_summary('order', item['id'])
@@ -1317,11 +1325,8 @@ class ReminderService:
         order = InspectionOrderService.get_by_id(order_id)
         if not order:
             raise ValueError("巡检单不存在")
-        if order['status'] not in [
-            InspectionOrderService.STATUS_PENDING_REVIEW,
-            InspectionOrderService.STATUS_FAULT_HANDLING
-        ]:
-            raise ValueError("当前状态不允许发起催办，仅待复核或故障处理中状态可催办")
+        if order['status'] != InspectionOrderService.STATUS_PENDING_REVIEW:
+            raise ValueError("当前状态不允许发起催办，仅待复核状态可催办")
         return order
 
     @staticmethod
