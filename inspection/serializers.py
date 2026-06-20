@@ -153,6 +153,7 @@ class FaultReviewSerializer(serializers.Serializer):
 
 class FaultCloseSerializer(serializers.Serializer):
     close_note = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    force = serializers.BooleanField(required=False, default=False)
 
 
 class FaultReopenSerializer(serializers.Serializer):

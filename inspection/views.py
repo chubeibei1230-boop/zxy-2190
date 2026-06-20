@@ -534,13 +534,19 @@ class FaultCloseView(APIView):
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
+        force_flag = serializer.validated_data.get('force', False)
+        if force_flag and request.user.role != 'admin':
+            return Response({'error': '只有管理员可以执行强制关闭操作'},
+                            status=status.HTTP_403_FORBIDDEN)
+
         try:
             fault = FaultService.close_fault(
                 fault_id=pk,
                 operator_id=request.user.id,
                 operator_name=request.user.real_name or request.user.username,
                 operator_role=request.user.role,
-                close_note=serializer.validated_data.get('close_note')
+                close_note=serializer.validated_data.get('close_note'),
+                force=force_flag
             )
             return Response(fault)
         except ValueError as e:

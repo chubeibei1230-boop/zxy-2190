@@ -842,8 +842,8 @@ class FaultService:
             raise ValueError("故障记录不存在")
         if fault['is_closed']:
             raise ValueError("故障已关闭，无法复核")
-        if fault['processing_status'] not in [FaultService.STATUS_REVIEWING, FaultService.STATUS_TEMP_SOLVED]:
-            raise ValueError("当前状态不允许复核")
+        if fault['processing_status'] != FaultService.STATUS_REVIEWING:
+            raise ValueError("当前状态不允许复核，请先由放映员执行【提交复核】操作后再复核")
 
         result_text = '通过' if review_result else '不通过'
         detail = f"复核结果：{result_text}"
@@ -920,28 +920,64 @@ class FaultService:
                 )
 
     @staticmethod
-    def close_fault(fault_id, operator_id, operator_name, operator_role, close_note=None):
+    def _sync_order_status_reopen(order_id):
+        unresolved = dict_fetch_one(
+            """SELECT COUNT(*) as cnt FROM fault_records 
+               WHERE order_id = ? AND is_closed = FALSE""",
+            [order_id]
+        )
+        if unresolved and unresolved['cnt'] > 0:
+            order = InspectionOrderService.get_by_id(order_id)
+            if order and order['status'] in [
+                InspectionOrderService.STATUS_PENDING_REVIEW,
+                InspectionOrderService.STATUS_READY,
+                InspectionOrderService.STATUS_SUSPENDED
+            ]:
+                InspectionOrderService.update_status(
+                    order_id, InspectionOrderService.STATUS_FAULT_HANDLING
+                )
+
+    @staticmethod
+    def close_fault(fault_id, operator_id, operator_name, operator_role,
+                    close_note=None, force=False):
         fault = FaultService.get_by_id(fault_id)
         if not fault:
             raise ValueError("故障记录不存在")
         if fault['is_closed']:
             raise ValueError("故障已关闭")
 
+        normal_close_statuses = [FaultService.STATUS_REVIEWING]
+        if force:
+            if operator_role != 'admin':
+                raise ValueError("只有管理员可以强制关闭故障")
+        else:
+            if fault['processing_status'] not in normal_close_statuses:
+                raise ValueError(
+                    "当前状态不允许关闭故障：必须先经过放映员【提交复核】后进入【复核中】状态才能正常关闭；"
+                    "如需跳过流程直接关闭，请由管理员使用【强制关闭】并说明原因"
+                )
+
         old_status = fault['processing_status']
         new_status = FaultService.STATUS_CLOSED
+        closed_loop_flag = not force
+
+        final_note = close_note or ''
+        if force:
+            final_note = f"【强制关闭】{final_note or '管理员强制关闭，未经过正常复核流程'}"
 
         execute_update(
             """UPDATE fault_records SET 
-               processing_status = ?, is_closed = TRUE, closed_loop = TRUE,
+               processing_status = ?, is_closed = TRUE, closed_loop = ?,
                closed_by_id = ?, closed_by_name = ?, closed_at = CURRENT_TIMESTAMP,
                resolved_at = CURRENT_TIMESTAMP,
                final_conclusion = COALESCE(final_conclusion, ?),
                updated_at = CURRENT_TIMESTAMP
                WHERE id = ?""",
-            [new_status, operator_id, operator_name, close_note or '管理员关闭', fault_id]
+            [new_status, closed_loop_flag, operator_id, operator_name,
+             final_note or '管理员关闭', fault_id]
         )
 
-        detail = close_note or "关闭故障"
+        detail = final_note or "关闭故障"
         FaultService._log_progress(
             fault_id=fault_id,
             operator_id=operator_id,
@@ -989,6 +1025,7 @@ class FaultService:
             to_status=new_status
         )
 
+        FaultService._sync_order_status_reopen(fault['order_id'])
         return FaultService.get_by_id(fault_id)
 
     @staticmethod
@@ -1126,6 +1163,68 @@ class FaultService:
                 'fault_id': f['id'],
                 'order_id': f['order_id'],
                 'hall_id': f['hall_id']
+            })
+
+        recently_closed = dict_fetch_all(
+            """SELECT f.*, h.hall_code, o.session_no
+               FROM fault_records f
+               LEFT JOIN halls h ON f.hall_id = h.id
+               LEFT JOIN inspection_orders o ON f.order_id = o.id
+               WHERE f.is_closed = TRUE 
+               AND f.closed_loop = TRUE
+               AND f.closed_at IS NOT NULL
+               AND f.closed_at >= CURRENT_TIMESTAMP - INTERVAL 24 HOUR
+               ORDER BY f.closed_at DESC
+               LIMIT 5""",
+            []
+        )
+        for f in recently_closed:
+            level = 'success'
+            prefix = '故障闭环完成'
+            reviewer = f.get('reviewer_name') or f.get('closed_by_name') or '系统'
+            conclusion = f.get('final_conclusion') or ''
+            if len(conclusion) > 20:
+                conclusion = conclusion[:20] + '...'
+            alerts.append({
+                'type': 'fault_closed_loop',
+                'level': level,
+                'message': (f"{prefix}：影厅 {f['hall_code']} 场次 {f['session_no']} "
+                           f"[{f.get('fault_level','')}] - 由 {reviewer} 处理完成。"
+                           f"结论：{conclusion}"),
+                'fault_id': f['id'],
+                'order_id': f['order_id'],
+                'hall_id': f['hall_id'],
+                'closed_loop': f.get('closed_loop', False),
+                'closed_at': f.get('closed_at'),
+                'closed_by': f.get('closed_by_name'),
+                'reviewer': f.get('reviewer_name')
+            })
+
+        force_closed = dict_fetch_all(
+            """SELECT f.*, h.hall_code, o.session_no
+               FROM fault_records f
+               LEFT JOIN halls h ON f.hall_id = h.id
+               LEFT JOIN inspection_orders o ON f.order_id = o.id
+               WHERE f.is_closed = TRUE 
+               AND f.closed_loop = FALSE
+               AND f.closed_at IS NOT NULL
+               AND f.closed_at >= CURRENT_TIMESTAMP - INTERVAL 72 HOUR
+               ORDER BY f.closed_at DESC
+               LIMIT 3""",
+            []
+        )
+        for f in force_closed:
+            alerts.append({
+                'type': 'fault_force_closed',
+                'level': 'warning',
+                'message': (f"⚠️ 故障被强制关闭（未经过正常复核闭环）："
+                           f"影厅 {f['hall_code']} 场次 {f['session_no']} "
+                           f"关闭人：{f.get('closed_by_name')}。建议关注后续复检情况。"),
+                'fault_id': f['id'],
+                'order_id': f['order_id'],
+                'hall_id': f['hall_id'],
+                'closed_at': f.get('closed_at'),
+                'closed_by': f.get('closed_by_name')
             })
 
         return alerts
